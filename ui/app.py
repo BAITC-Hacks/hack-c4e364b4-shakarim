@@ -11,7 +11,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from components import inject_styles, normalise_id, render_brand, render_client_card, render_cluster, render_role_legend, render_top_nodes
+from components import inject_styles, normalise_id, render_brand, render_client_card, render_cluster, render_pipeline_waiting_state, render_role_legend, render_top_nodes
 from graph_view import load_edges, render_client_connections
 
 
@@ -88,12 +88,15 @@ def main() -> None:
     clusters, clusters_error = read_result("clusters.csv")
     top_nodes, top_nodes_error = read_result("top_nodes.csv")
     if nodes.empty:
-        st.error(nodes_error or f"Файл nodes_roles.csv пуст: {RESULTS_DIR}")
-        st.stop()
+        message = nodes_error or f"Файл nodes_roles.csv пуст: {RESULTS_DIR}"
+        st.warning(message)
+        render_pipeline_waiting_state(message)
+        return
     node_issues = validate_nodes(nodes)
     if node_issues:
         st.error("nodes_roles.csv не прошёл проверку: " + "; ".join(node_issues))
-        st.stop()
+        render_pipeline_waiting_state("Исправьте контракт nodes_roles.csv и обновите страницу.")
+        return
     cluster_issue = clusters_error or validate_optional_table(clusters, "clusters.csv", {"cluster_id"})
     top_issue = top_nodes_error or validate_optional_table(top_nodes, "top_nodes.csv", {"gid", "priority_score"})
     if cluster_issue:
@@ -129,7 +132,8 @@ def main() -> None:
     selected = find_selected_client(nodes, requested_gid, fallback_gid)
     if selected.empty:
         st.error("Не удалось выбрать клиента из nodes_roles.csv.")
-        st.stop()
+        render_pipeline_waiting_state("Проверьте, что в nodes_roles.csv есть хотя бы один корректный gid.")
+        return
     left, right = st.columns([1.05, 1.55], gap="large")
     with left:
         render_client_card(selected)

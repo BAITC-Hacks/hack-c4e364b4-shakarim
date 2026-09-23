@@ -83,6 +83,20 @@ def render_brand() -> None:
     )
 
 
+def render_pipeline_waiting_state(message: str) -> None:
+    """Keep the product shell useful while analytical exports are being generated."""
+    st.markdown(
+        f'<div class="tf-panel" style="margin-top:2rem;max-width:760px">'
+        '<div class="tf-eyebrow">Pipeline status</div>'
+        '<div class="tf-panel-title" style="font-size:1.45rem">Waiting for analytical results</div>'
+        f'<div class="tf-evidence">{escape(message)}</div>'
+        '<div style="color:#68758a;font-size:.9rem;margin-top:1rem;line-height:1.55">'
+        'Интерфейс готов. После появления nodes_roles.csv, clusters.csv и top_nodes.csv '
+        'данные подгрузятся при следующем обновлении страницы.</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
 def role_color(role: Any) -> str:
     """Return a stable colour for a pipeline-provided role."""
     return ROLE_COLORS.get(str(role).strip().lower(), DEFAULT_ROLE_COLOR)
