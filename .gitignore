@@ -1,3 +1,7 @@
+.pytest_cache/
+.ui-runtime/
+tmp/
+streamlit.*.log
 # Python bytecode and local environments
 __pycache__/
 *.py[cod]
@@ -9,6 +13,9 @@ venv/
 .idea/
 .vscode/
 
-# Source datasets and generated metrics are supplied/generated locally.
-data/*.parquet
-output/node_metrics.csv
+# The small supplied dataset is versioned under data/. Results are regenerated
+# by the owning branches and exchanged through output/, never source code.
+/output/*.csv
+/output/*.parquet
+__MACOSX/
+._*

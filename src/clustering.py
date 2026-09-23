@@ -1,11 +1,16 @@
-"""Deterministic weighted Louvain-style local modularity optimization."""
+"""Deterministic Louvain-style clustering on a weighted undirected projection.
+
+Each directed transaction ``source -> target`` contributes its weight to the same
+undirected ``{source, target}`` edge. Direction remains available in node metrics
+and is not used to alter community membership.
+"""
 from __future__ import annotations
 
 from collections import defaultdict
 
 
 def louvain(nodes, edges):
-    """Return stable integer communities; edges are (source, target, weight)."""
+    """Return stable communities from directed weighted edges projected to undirected."""
     graph = {str(n): defaultdict(float) for n in nodes}
     for source, target, weight in edges:
         source, target, weight = str(source), str(target), float(weight)
