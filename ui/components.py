@@ -19,6 +19,56 @@ ROLE_COLORS = {
 DEFAULT_ROLE_COLOR = "#94A3B8"
 
 
+def inject_styles() -> None:
+    """Apply the product visual system without adding a frontend dependency."""
+    st.markdown(
+        """
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+        :root { --ink:#172033; --muted:#68758a; --line:#e6eaf1; --surface:#ffffff; --accent:#315efb; }
+        html, body, [class*="css"] { font-family:'DM Sans', sans-serif; }
+        [data-testid="stAppViewContainer"] { background:#f5f7fb; }
+        [data-testid="stHeader"] { background:rgba(245,247,251,.85); }
+        .block-container { max-width:1440px; padding:2.25rem 3.25rem 4rem; }
+        h1, h2, h3 { font-family:'Space Grotesk', sans-serif; color:var(--ink); letter-spacing:-.025em; }
+        h1 { font-size:2.15rem !important; margin-bottom:.15rem !important; }
+        h2 { font-size:1.25rem !important; }
+        h3 { font-size:1.05rem !important; }
+        [data-testid="stSidebar"] { background:#111827; border-right:0; }
+        [data-testid="stSidebar"] * { color:#e5e7eb; }
+        [data-testid="stSidebar"] input { background:#1f2937; border:1px solid #374151; color:#fff; }
+        [data-testid="stSidebar"] [data-baseweb="select"] > div { background:#1f2937; border-color:#374151; }
+        .tf-brand { display:flex; align-items:center; gap:.75rem; margin:.25rem 0 2.2rem; }
+        .tf-mark { width:34px; height:34px; border-radius:10px; display:grid; place-items:center; background:#315efb; color:#fff; font-weight:700; box-shadow:0 7px 16px #315efb40; }
+        .tf-brand-name { color:#fff; font:700 1.05rem 'Space Grotesk', sans-serif; }
+        .tf-brand-sub { color:#94a3b8; font-size:.7rem; letter-spacing:.1em; text-transform:uppercase; }
+        .tf-header { display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:1.7rem; }
+        .tf-kicker { color:#315efb; font-size:.72rem; font-weight:700; letter-spacing:.13em; text-transform:uppercase; margin-bottom:.4rem; }
+        .tf-subtitle { color:var(--muted); font-size:.95rem; }
+        .tf-status { color:#1b7b4b; background:#e6f7ee; border:1px solid #c6ecd8; border-radius:999px; padding:.42rem .7rem; font-size:.75rem; font-weight:700; letter-spacing:.04em; }
+        .tf-panel { background:var(--surface); border:1px solid var(--line); border-radius:18px; padding:1.25rem 1.35rem; box-shadow:0 10px 30px #24324a08; }
+        .tf-panel-title { color:var(--ink); font:600 1rem 'Space Grotesk', sans-serif; margin-bottom:.9rem; }
+        .tf-eyebrow { color:#8190a6; font-size:.69rem; font-weight:700; letter-spacing:.12em; text-transform:uppercase; margin:1.25rem 0 .55rem; }
+        .tf-metric { background:#f8fafc; border:1px solid #edf0f5; border-radius:13px; padding:.75rem .85rem; min-height:74px; }
+        .tf-metric-label { color:#7a8799; font-size:.72rem; margin-bottom:.25rem; }
+        .tf-metric-value { color:var(--ink); font:700 1.22rem 'Space Grotesk', sans-serif; }
+        .tf-evidence { border-left:3px solid #315efb; background:#f4f7ff; border-radius:0 12px 12px 0; color:#35445a; padding:.8rem .95rem; font-size:.89rem; line-height:1.5; }
+        .tf-empty { border:1px dashed #cbd5e1; border-radius:14px; padding:1.1rem; color:#758399; background:#fafbfc; }
+        .tf-sidebar-label { color:#94a3b8; font-size:.69rem; font-weight:700; letter-spacing:.11em; text-transform:uppercase; margin:1rem 0 .55rem; }
+        div[data-testid="stDataFrame"] { border:1px solid var(--line); border-radius:14px; overflow:hidden; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_brand() -> None:
+    st.markdown(
+        '<div class="tf-brand"><div class="tf-mark">◈</div><div><div class="tf-brand-name">TraceFlow</div><div class="tf-brand-sub">Network intelligence</div></div></div>',
+        unsafe_allow_html=True,
+    )
+
+
 def role_color(role: Any) -> str:
     """Return a stable colour for a pipeline-provided role."""
     return ROLE_COLORS.get(str(role).strip().lower(), DEFAULT_ROLE_COLOR)
@@ -49,21 +99,24 @@ def render_role_legend() -> None:
 
 def render_client_card(client: pd.Series) -> None:
     """Show only fields prepared by the analytics pipeline."""
-    st.subheader(f"Клиент {client['gid']}")
+    st.markdown('<div class="tf-eyebrow">Selected subject</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="tf-panel-title" style="font-size:1.35rem">Client {client["gid"]}</div>', unsafe_allow_html=True)
     st.markdown(role_badge(client.get("role")), unsafe_allow_html=True)
 
     left, middle, right = st.columns(3)
-    left.metric("Role score", format_score(client.get("role_score")))
-    middle.metric("Priority score", format_score(client.get("priority_score")))
-    right.metric("Cluster", str(client.get("cluster_id", "—")))
+    left.markdown(f'<div class="tf-metric"><div class="tf-metric-label">Role score</div><div class="tf-metric-value">{format_score(client.get("role_score"))}</div></div>', unsafe_allow_html=True)
+    middle.markdown(f'<div class="tf-metric"><div class="tf-metric-label">Priority score</div><div class="tf-metric-value">{format_score(client.get("priority_score"))}</div></div>', unsafe_allow_html=True)
+    right.markdown(f'<div class="tf-metric"><div class="tf-metric-label">Cluster</div><div class="tf-metric-value">{client.get("cluster_id", "—")}</div></div>', unsafe_allow_html=True)
 
     evidence = client.get("evidence")
-    st.caption("Объяснение от аналитического пайплайна")
-    st.info(str(evidence) if pd.notna(evidence) and str(evidence).strip() else "Нет объяснения в выгрузке.")
+    st.markdown('<div class="tf-eyebrow">Evidence from pipeline</div>', unsafe_allow_html=True)
+    text = str(evidence) if pd.notna(evidence) and str(evidence).strip() else "Нет объяснения в выгрузке."
+    st.markdown(f'<div class="tf-evidence">{text}</div>', unsafe_allow_html=True)
 
 
 def render_top_nodes(top_nodes: pd.DataFrame) -> None:
-    st.subheader("TOP-20 узлов")
+    st.markdown('<div class="tf-eyebrow">Prioritised review queue</div>', unsafe_allow_html=True)
+    st.markdown('<div class="tf-panel-title" style="font-size:1.25rem">TOP-20 nodes</div>', unsafe_allow_html=True)
     if top_nodes.empty:
         st.info("Файл top_nodes.csv пока не содержит строк.")
         return
@@ -75,7 +128,8 @@ def render_top_nodes(top_nodes: pd.DataFrame) -> None:
 
 def render_cluster(client: pd.Series, nodes: pd.DataFrame, clusters: pd.DataFrame) -> None:
     cluster_id = client.get("cluster_id")
-    st.subheader("Кластер клиента")
+    st.markdown('<div class="tf-eyebrow">Network context</div>', unsafe_allow_html=True)
+    st.markdown('<div class="tf-panel-title">Client cluster</div>', unsafe_allow_html=True)
     if pd.isna(cluster_id):
         st.info("Для клиента не указан кластер.")
         return

@@ -11,7 +11,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from components import render_client_card, render_cluster, render_role_legend, render_top_nodes
+from components import inject_styles, render_brand, render_client_card, render_cluster, render_role_legend, render_top_nodes
 from graph_view import load_edges, render_client_connections
 
 
@@ -39,8 +39,14 @@ def find_selected_client(nodes: pd.DataFrame, requested_gid: str, fallback_gid: 
 
 def main() -> None:
     st.set_page_config(page_title="TraceFlow | Аналитик", page_icon="◈", layout="wide")
-    st.title("TraceFlow")
-    st.caption("Экран аналитика: готовые роли, приоритеты и доказательства из пайплайна.")
+    inject_styles()
+    with st.sidebar:
+        st.markdown('<div class="tf-sidebar-label">Workspace</div>', unsafe_allow_html=True)
+        render_brand()
+    st.markdown(
+        '<div class="tf-header"><div><div class="tf-kicker">Financial network intelligence</div><h1>Investigation workspace</h1><div class="tf-subtitle">Разбор структуры переводов по готовым аналитическим результатам</div></div><div class="tf-status">● PIPELINE READY</div></div>',
+        unsafe_allow_html=True,
+    )
 
     nodes = read_result("nodes_roles.csv")
     clusters = read_result("clusters.csv")
@@ -65,7 +71,7 @@ def main() -> None:
     ]
     edges, edge_path = load_edges(edge_candidates)
 
-    st.sidebar.header("Поиск клиента")
+    st.sidebar.markdown('<div class="tf-sidebar-label">Find a client</div>', unsafe_allow_html=True)
     requested_gid = st.sidebar.text_input("Введите gid", placeholder="Например, 12345")
     options = nodes["gid"].tolist()
     default_index = 0
@@ -73,11 +79,12 @@ def main() -> None:
         top_gid = str(top_nodes.iloc[0]["gid"])
         default_index = next((index for index, gid in enumerate(options) if str(gid) == top_gid), 0)
     fallback_gid = st.sidebar.selectbox("Или выберите из списка", options, index=default_index, format_func=str)
-    st.sidebar.divider()
-    st.sidebar.caption("Цвета ролей")
-    render_role_legend()
-    if edge_path:
-        st.sidebar.caption(f"Связи: {edge_path.relative_to(ROOT)}")
+    with st.sidebar:
+        st.divider()
+        st.markdown('<div class="tf-sidebar-label">Role legend</div>', unsafe_allow_html=True)
+        render_role_legend()
+        if edge_path:
+            st.caption(f"Связи: {edge_path.relative_to(ROOT)}")
 
     selected = find_selected_client(nodes, requested_gid, fallback_gid)
     left, right = st.columns([1.05, 1.55], gap="large")
