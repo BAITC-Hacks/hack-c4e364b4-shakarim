@@ -1,5 +1,7 @@
 """Regression checks for the judge's search and evidence workflow."""
 import sys
+import hashlib
+import json
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -14,9 +16,59 @@ from streamlit.testing.v1 import AppTest
 import app
 from components import investigation_brief, normalise_id
 from graph_view import _network_canvas, load_edges
+from data_access import OUTPUT_FILES, SOURCE_FILES, read_source, validate_analysis_context
 
 
 class ContractTests(unittest.TestCase):
+    def test_source_report_and_edge_caches_refresh_immediately_after_file_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            with patch("data_access.DATA_DIR", folder):
+                for size in (1, 2):
+                    source = pd.DataFrame({"gid": list(range(size)), "depth": 0, "is_seed": False})
+                    source.to_parquet(folder / "nodes.parquet")
+                    source.to_csv(folder / "node_metrics.csv", index=False)
+                    pd.DataFrame({"src": list(range(size)), "dst": 9, "sum_kzt": 5000}).to_csv(
+                        folder / "edges.csv", index=False)
+                    self.assertEqual(len(read_source("nodes")[0]), size)
+                    self.assertEqual(len(app.read_result("node_metrics.csv", folder)[0]), size)
+                    self.assertEqual(len(load_edges((folder / "edges.csv",))[0]), size)
+
+    def test_only_matching_manifest_sources_and_outputs_enable_raw_enrichment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output, source = root / "output", root / "data"
+            output.mkdir()
+            source.mkdir()
+            context = {"schema_version": 1, "mode": "parquet", "data_dir": str(source),
+                       "source_sha256": {}, "output_sha256": {}}
+            for folder, names, key in ((output, OUTPUT_FILES, "output_sha256"),
+                                       (source, SOURCE_FILES, "source_sha256")):
+                for name in names:
+                    content = (name + " original").encode()
+                    (folder / name).write_bytes(content)
+                    context[key][name] = hashlib.sha256(content).hexdigest()
+            manifest = output / "analysis_context.json"
+            self.assertFalse(validate_analysis_context(output, source)[0])
+            manifest.write_text(json.dumps(context), encoding="utf-8")
+            self.assertEqual(validate_analysis_context(output, source), (True, None))
+            self.assertFalse(validate_analysis_context(output, root / "different-data")[0])
+            for folder, name in ((source, "transactions.parquet"), (output, "nodes_roles.csv")):
+                path = folder / name
+                original = path.read_bytes()
+                path.write_bytes(original + b" changed")
+                valid, reason = validate_analysis_context(output, source)
+                self.assertFalse(valid)
+                self.assertIn(name, reason)
+                path.write_bytes(original)
+            context["mode"] = "metrics"
+            context["data_dir"] = None
+            context["source_sha256"] = {}
+            manifest.write_text(json.dumps(context), encoding="utf-8")
+            valid, reason = validate_analysis_context(output, source)
+            self.assertFalse(valid)
+            self.assertIn("CSV метрик", reason)
+
     def test_invalid_edge_export_does_not_fall_back_to_another_dataset(self):
         with tempfile.TemporaryDirectory() as directory:
             primary, fallback = Path(directory) / "edges.csv", Path(directory) / "fallback.csv"
@@ -85,9 +137,13 @@ class ContractTests(unittest.TestCase):
         nodes, _, _, _ = app.demo_results()
         nodes.loc[0, "role_score"] = 1.1
         nodes.loc[1, "evidence"] = " "
+        nodes.loc[2, "priority_score"] = 1.1
+        nodes.loc[3, "role"] = "unknown"
         issues = app.validate_nodes(nodes)
         self.assertTrue(any("role_score" in item for item in issues))
         self.assertTrue(any("evidence" in item for item in issues))
+        self.assertTrue(any("priority_score" in item for item in issues))
+        self.assertTrue(any(item.startswith("role:") for item in issues))
 
     def test_graph_escapes_external_ids_and_keeps_directions(self):
         nodes, _, _, edges = app.demo_results()
@@ -261,6 +317,34 @@ class AppTests(unittest.TestCase):
         self.assertFalse(any("нет переводов этого клиента" in i.value for i in at.info))
         self.assertFalse(any(m.label == "Получено в графе" for m in at.metric))
 
+    def test_broken_edges_preserve_seed_and_depth_caveats(self):
+        nodes, _, _, _ = self.write_results()
+        nodes.loc[nodes.gid.eq("901245"), ["is_seed", "depth"]] = [True, 4]
+        nodes.to_csv(self.output / "nodes_roles.csv", index=False)
+        (self.output / "edges.csv").write_text("wrong,columns\n1,2\n", encoding="utf-8")
+        at = self.launch()
+        self.assertTrue(any("входящий поток неполон" in item.value for item in at.info))
+        self.assertTrue(any("Граница 4-го колена" in item.value for item in at.warning))
+
+    def test_csv_reports_do_not_mix_in_unverified_raw_transactions_or_metadata(self):
+        self.write_results()
+        for context in (None, {"schema_version": 1, "mode": "metrics", "data_dir": None,
+                               "source_sha256": {}, "output_sha256": {}}):
+            with self.subTest(context=context):
+                if context is not None:
+                    (self.output / "analysis_context.json").write_text(json.dumps(context), encoding="utf-8")
+                with patch("app.read_source", side_effect=AssertionError("Unverified raw data must not be read")):
+                    at = self.launch()
+                self.assertTrue(any("История переводов из исходных данных не подключена" in item.value for item in at.warning))
+                self.assertTrue(any('class="subject-id"' in item.value for item in at.markdown))
+
+    def test_current_edges_csv_takes_precedence_over_stale_output_parquet(self):
+        self.write_results()
+        (self.output / "edges.parquet").write_bytes(b"stale broken parquet from an older run")
+        at = self.launch()
+        self.assertTrue(any("Источник связей: edges.csv" in item.value for item in at.caption))
+        self.assertFalse(any("Не удалось прочитать edges.parquet" in item.value for item in at.warning))
+
     def test_default_demo_does_not_need_analytics_or_parquet(self):
         with patch("app.read_source", side_effect=AssertionError("Demo must not read real data")):
             at = self.launch()
@@ -324,29 +408,29 @@ class AppTests(unittest.TestCase):
         self.assertEqual(at.session_state.traceflow_active_gid, gid)
         self.assertTrue(any("Граница 4-го колена" in item.value for item in at.warning))
 
-    def test_legacy_priority_scale_is_displayed_without_recalculation(self):
+    def test_legacy_priority_scale_is_rejected_without_recalculation(self):
         nodes, _, top, _ = self.write_results()
         nodes.priority_score *= 100
         top.priority_score *= 100
         top["why"] = "Готовая причина аналитики; шкала /100."
         nodes.to_csv(self.output / "nodes_roles.csv", index=False)
         top.to_csv(self.output / "top_nodes.csv", index=False)
+        before = (self.output / "nodes_roles.csv").read_bytes()
         at = self.launch()
-        card = next(m.value for m in at.markdown if 'class="subject-id"' in m.value)
-        self.assertIn("Приоритет / 100", card)
-        self.assertIn("98.00", card)
-        self.assertTrue(any("без пересчёта" in item.value for item in at.warning))
+        self.assertTrue(any("priority_score: требуются числа от 0 до 1" in m.value for m in at.markdown))
+        self.assertFalse(any('class="subject-id"' in m.value for m in at.markdown))
+        self.assertEqual(before, (self.output / "nodes_roles.csv").read_bytes())
 
-    def test_long_evidence_warns_without_blocking_search_or_truncating_text(self):
+    def test_long_evidence_is_rejected_without_rewriting_export(self):
         nodes, _, _, _ = self.write_results()
         full_text = "Обоснование аналитики: " + "наблюдение " * 20
         nodes.loc[nodes.gid == "901245", "evidence"] = full_text
         nodes.to_csv(self.output / "nodes_roles.csv", index=False)
+        before = (self.output / "nodes_roles.csv").read_bytes()
         at = self.launch()
-        self.assertTrue(at.text_input)
-        card = next(m.value for m in at.markdown if 'class="subject-id"' in m.value)
-        self.assertIn(full_text, card)
-        self.assertTrue(any("длиннее 200" in item.value for item in at.warning))
+        self.assertTrue(any("не более 200" in m.value for m in at.markdown))
+        self.assertFalse(any('class="subject-id"' in m.value for m in at.markdown))
+        self.assertEqual(before, (self.output / "nodes_roles.csv").read_bytes())
 
     def test_design_preview_is_separate_and_can_close(self):
         at = self.launch()

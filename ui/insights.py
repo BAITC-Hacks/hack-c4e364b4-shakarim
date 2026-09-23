@@ -12,6 +12,16 @@ def incident_edges(gid: object, edges: pd.DataFrame) -> pd.DataFrame:
     return edges.loc[src.eq(key) | dst.eq(key)].copy()
 
 
+def render_collection_caveats(client: pd.Series) -> None:
+    """Collection limits still apply when an edge export cannot be loaded."""
+    depth = client.get("depth")
+    boundary_flag = str(client.get("truncated_by_depth", "")).lower() in {"true", "1", "1.0"}
+    if boundary_flag or (pd.notna(depth) and str(depth) in {"4", "4.0"}):
+        st.warning("Граница 4-го колена: дальнейшие переводы могут не наблюдаться. Это не доказательство того, что деньги остались у клиента.")
+    if str(client.get("is_seed", "")).lower() in {"true", "1", "1.0"}:
+        st.info("Исходный клиент (seed). Его входящий поток неполон; отношение отправленного к полученному не отражает полный баланс.")
+
+
 def render_observed(client: pd.Series, edges: pd.DataFrame) -> None:
     key = normalise_id(client.gid)
     incident = incident_edges(key, edges)
@@ -22,12 +32,6 @@ def render_observed(client: pd.Series, edges: pd.DataFrame) -> None:
                                   (cols[1], "Отправлено в графе", outgoing, "dst")]:
         col.metric(label, format_money(table.sum_kzt.sum()) if "sum_kzt" in table else "—")
         col.caption(f"Контрагентов: {table[peer].nunique()}")
-    depth = client.get("depth")
-    boundary_flag = str(client.get("truncated_by_depth", "")).lower() in {"true", "1", "1.0"}
-    if boundary_flag or (pd.notna(depth) and str(depth) in {"4", "4.0"} and outgoing.empty):
-        st.warning("Граница 4-го колена: дальнейшие переводы не наблюдаются. Это не доказательство того, что деньги остались у клиента.")
-    if str(client.get("is_seed", "")).lower() in {"true", "1"}:
-        st.info("Исходный клиент (seed). Его входящий поток неполон; отношение отправленного к полученному не отражает полный баланс.")
     st.caption("Суммы относятся только к наблюдаемой сети. Роли — гипотезы для проверки.")
 
 
