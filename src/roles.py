@@ -2,6 +2,8 @@
 
 Rules are evaluated in the listed order, so every gid receives exactly one role:
 
+0. Censored leaves (depth >= 4, no observed outgoing transfers) are ``peripheral``
+   with low support. Missing outflow is not evidence of retention/consolidation.
 1. ``peripheral`` — no turnover, or at most two counterparties and two transactions.
 2. ``terminal`` — received funds and sent at most 20% of them. A node at ``depth >= 4``
    with no observed outgoing edge is excluded because the extraction boundary censors it.
@@ -14,8 +16,13 @@ Rules are evaluated in the listed order, so every gid receives exactly one role:
 6. ``transit`` — positive incoming and outgoing turnover; sends 75%–125% of received funds.
 7. ``peripheral`` — fallback for sparse or inconclusive activity.
 
-``role_score`` is a 0–1 confidence value derived from the same metrics; it never changes
-the rule-selected role. The generated evidence states the values that triggered the rule.
+Seeds have incomplete inflow: terminal/transit and balance-based decisions are
+disabled. For seeds coordinator uses >=5 senders and >=5 receivers; consolidator
+uses >=3 senders and >=2 times as many senders as receivers (positive inflow);
+distributor is symmetric (positive outflow). These are structural hypotheses.
+
+``role_score`` is bounded heuristic support, not a calibrated probability. It
+never changes the selected role. Its formula is documented in analytics.md.
 """
 from __future__ import annotations
 
@@ -41,14 +48,17 @@ ALIASES = {
 }
 
 ROLE_RULES = (
+    "peripheral: censored depth-4 leaf; no retention evidence, support 0.2",
     "peripheral: zero turnover or <=2 counterparties and <=2 transactions",
-    "terminal: outgoing <=20% of incoming; depth-4 boundary with no outgoing edge is excluded",
-    "coordinator: >=5 senders, >=5 receivers, and turnover balance >=50%",
-    "consolidator: >=3 senders and incoming >120% of outgoing",
-    "distributor: >=3 receivers and outgoing >120% of incoming",
-    "transit: outgoing is 75%–125% of incoming",
+    "terminal: non-seed, incoming >0, outgoing <=20% of incoming",
+    "coordinator: >=5 senders, >=5 receivers; balance >=50% for non-seeds",
+    "consolidator: >=3 senders, incoming >0; incoming >120% of outgoing, or seed senders >=2*max(receivers,1)",
+    "distributor: >=3 receivers, outgoing >0; outgoing >120% of incoming, or seed receivers >=2*max(senders,1)",
+    "transit: non-seed, positive incoming/outgoing, outgoing is 75%–125% of incoming",
     "peripheral: fallback",
 )
+
+ROLE_NAMES = frozenset({"consolidator", "transit", "distributor", "terminal", "coordinator", "peripheral"})
 
 MAX_EVIDENCE_LENGTH = 200
 
@@ -74,9 +84,23 @@ def number(row: Mapping, metric: str) -> float:
 def is_seed(row: Mapping) -> bool:
     for name in ALIASES["seed"]:
         value = str(next((v for k, v in row.items() if key_name(k) == name), "")).strip().lower()
-        if value in {"1", "true", "yes", "да", "seed"}:
+        if value in {"1", "1.0", "true", "yes", "да", "seed"}:
             return True
     return False
+
+
+def is_censored(row: Mapping) -> bool:
+    """No observed output at the extraction boundary cannot establish a sink."""
+    flagged = str(row.get("truncated_by_depth", "")).strip().lower() in {"true", "1", "1.0"}
+    no_output = (
+        number(row, "out_amount") <= 0 and number(row, "unique_receivers") <= 0
+        and number(row, "out_count") <= 0 and number(row, "out_degree") <= 0
+    )
+    return flagged or (number(row, "depth") >= 4 and no_output)
+
+
+def amount_text(value: float) -> str:
+    return f"{value:,.0f}" if abs(value) < 1e12 else f"{value:.3g}"
 
 
 def classify(row: Mapping) -> tuple[str, float, str]:
@@ -84,18 +108,21 @@ def classify(row: Mapping) -> tuple[str, float, str]:
     senders, receivers = max(0.0, number(row, "unique_senders")), max(0.0, number(row, "unique_receivers"))
     incount, outcount = max(0.0, number(row, "in_count")), max(0.0, number(row, "out_count"))
     total = incoming + outgoing
-    depth = number(row, "depth")
-    out_degree = number(row, "out_degree")
+    seed, censored = is_seed(row), is_censored(row)
     ratio = min(incoming, outgoing) / max(incoming, outgoing) if max(incoming, outgoing) else 0.0
     pass_through = outgoing / incoming if incoming else 0.0
     sparse = total == 0 or (senders + receivers <= 2 and incount + outcount <= 2)
-    terminal = incoming > 0 and outgoing <= incoming * .2 and not (depth >= 4 and out_degree == 0)
-    coordinator = senders >= 5 and receivers >= 5 and ratio >= .5
-    consolidator = senders >= 3 and incoming > outgoing * 1.2
-    distributor = receivers >= 3 and outgoing > incoming * 1.2
-    transit = incoming > 0 and outgoing > 0 and .75 <= pass_through <= 1.25
+    terminal = not seed and incoming > 0 and outgoing <= incoming * .2
+    coordinator = senders >= 5 and receivers >= 5 and (seed or ratio >= .5)
+    consolidator = senders >= 3 and incoming > 0 and (
+        senders >= 2 * max(receivers, 1) if seed else incoming > outgoing * 1.2
+    )
+    distributor = receivers >= 3 and outgoing > 0 and (
+        receivers >= 2 * max(senders, 1) if seed else outgoing > incoming * 1.2
+    )
+    transit = not seed and incoming > 0 and outgoing > 0 and .75 <= pass_through <= 1.25
 
-    if sparse:
+    if censored or sparse:
         role = "peripheral"
     elif terminal:
         role = "terminal"
@@ -110,28 +137,33 @@ def classify(row: Mapping) -> tuple[str, float, str]:
     else:
         role = "peripheral"
 
+    in_dominance = max(0, incoming - outgoing) / max(incoming, 1)
+    out_dominance = max(0, outgoing - incoming) / max(outgoing, 1)
     score_by_role = {
-        "coordinator": (math.log1p(senders + receivers) / math.log(11)) * .45 + ratio * .35 + min(1.0, total / 1_000_000) * .20,
-        "consolidator": min(1.0, senders / 10) * .45 + min(1.0, incoming / max(outgoing, 1)) * .35 + min(1.0, incoming / 1_000_000) * .20,
-        "distributor": min(1.0, receivers / 10) * .45 + min(1.0, outgoing / max(incoming, 1)) * .35 + min(1.0, outgoing / 1_000_000) * .20,
+        "coordinator": min(1, math.log1p(senders + receivers) / math.log(101)) * .45 + (0 if seed else ratio) * .35 + min(1.0, total / 1_000_000) * .20,
+        "consolidator": min(1.0, senders / 10) * .45 + (0 if seed else in_dominance) * .35 + min(1.0, incoming / 1_000_000) * .20,
+        "distributor": min(1.0, receivers / 10) * .45 + (0 if seed else out_dominance) * .35 + min(1.0, outgoing / 1_000_000) * .20,
         "transit": ratio * .60 + min(1.0, outcount / max(incount, 1)) * .15 + min(1.0, total / 1_000_000) * .25,
         "terminal": (1 - min(1.0, pass_through)) * .55 + min(1.0, incoming / 500_000) * .25 + min(1.0, senders / 5) * .20,
-        "peripheral": .35 + min(.5, 1 / max(senders + receivers, 1)) * .5,
+        "peripheral": .2 if censored or not sparse else .6,
     }
     score = score_by_role[role]
     score = round(max(.05, min(1.0, score)), 3)
+    flows = f"вход {amount_text(incoming)}, выход {amount_text(outgoing)} KZT"
     if role == "consolidator":
-        evidence = f"Получает средства от {int(senders)} уникальных отправителей; входящий объём {incoming:,.0f} KZT превышает исходящий {outgoing:,.0f} KZT."
+        evidence = f"Признаки консолидации: {senders:g} отправителей, {receivers:g} получателей; {flows}."
     elif role == "distributor":
-        evidence = f"Переводит средства {int(receivers)} уникальным получателям; исходящий объём {outgoing:,.0f} KZT превышает входящий {incoming:,.0f} KZT."
+        evidence = f"Признаки распределения: {receivers:g} получателей, {senders:g} отправителей; {flows}."
     elif role == "transit":
-        evidence = f"Получает {incoming:,.0f} KZT и переводит дальше {pass_through:.0%} входящего объёма."
+        evidence = f"Признаки транзита: вход {amount_text(incoming)} KZT, выход {amount_text(outgoing)} KZT ({pass_through:.0%} входа); {senders:g} отправителей."
     elif role == "terminal":
-        evidence = f"Получает {incoming:,.0f} KZT, исходящий объём составляет {outgoing:,.0f} KZT ({pass_through:.0%} входящего)."
+        evidence = f"Возможный конечный получатель: {flows}; выход {pass_through:.0%} входа, отправителей {senders:g}."
     elif role == "coordinator":
-        evidence = f"Связан с {int(senders)} отправителями и {int(receivers)} получателями; объёмы входящих и исходящих средств сопоставимы."
+        evidence = f"Признаки координации: {senders:g} отправителей и {receivers:g} получателей; {flows}."
     else:
-        evidence = f"Небольшая активность: {int(senders)} уникальных отправителей, {int(receivers)} получателей, оборот {total:,.0f} KZT."
-    if depth >= 4 and out_degree == 0:
-        evidence += " Глубина 4: 0 исходящих может быть следствием границы выгрузки; terminal не подтверждён."
+        evidence = f"Роль не определена: {senders:g} отправителей, {receivers:g} получателей; {flows}."
+    if censored:
+        evidence += " Обрыв на depth=4: 0 исходящих — эффект границы выгрузки."
+    if seed:
+        evidence += " Seed: входящие неполны; баланс не используется."
     return role, score, evidence_text(evidence)

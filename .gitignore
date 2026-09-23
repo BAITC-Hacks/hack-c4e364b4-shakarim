@@ -17,5 +17,6 @@ venv/
 # by the owning branches and exchanged through output/, never source code.
 /output/*.csv
 /output/*.parquet
+/output/analysis_context.json
 __MACOSX/
 ._*

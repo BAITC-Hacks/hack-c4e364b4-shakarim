@@ -5,6 +5,7 @@ import sys
 import tempfile
 import time
 import unittest
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -29,7 +30,7 @@ import pipeline
 
 METRIC_COLUMNS = {
     "gid", "depth", "is_seed", "in_degree", "out_degree", "in_amount", "out_amount",
-    "in_tx_count", "out_tx_count", "unique_senders", "unique_receivers", "pass_through",
+    "in_tx_count", "out_tx_count", "unique_senders", "unique_receivers", "pass_ratio", "pass_through",
     "pagerank", "betweenness", "truncated_by_depth",
 }
 
@@ -345,7 +346,7 @@ class PipelineIntegrationTests(unittest.TestCase):
     def test_node_metrics_contract(self):
         required = {"gid", "depth", "is_seed", "in_degree", "out_degree", "in_amount", "out_amount",
                     "unique_senders", "unique_receivers", "in_tx_count", "out_tx_count",
-                    "truncated_by_depth", "pass_through", "pagerank", "betweenness"}
+                    "truncated_by_depth", "pass_ratio", "pass_through", "pagerank", "betweenness"}
         self.assertTrue(required.issubset(self.metrics_df.columns))
         self.assertEqual(len(self.metrics_df), len(self.nodes))
         self.assertTrue(self.metrics_df["gid"].is_unique)
@@ -373,7 +374,9 @@ class PipelineIntegrationTests(unittest.TestCase):
 
     def test_real_seed_and_boundary_nodes_are_not_misinterpreted(self):
         result = self.metrics_df
-        self.assertTrue(result.loc[result.is_seed, "pass_through"].isna().all())
+        for column in ("pass_ratio", "pass_through"):
+            self.assertTrue(result.loc[result.is_seed, column].isna().all())
+        pd.testing.assert_series_equal(result.pass_ratio, result.pass_through, check_names=False)
         isolated = result[(result.in_degree == 0) & (result.out_degree == 0)]
         self.assertEqual(len(isolated), 19)
         self.assertTrue(isolated.is_seed.all())
@@ -383,6 +386,16 @@ class PipelineIntegrationTests(unittest.TestCase):
         pd.testing.assert_series_equal(result.truncated_by_depth, boundary, check_names=False)
         observed = result[~result.is_seed & (result.in_amount > 0)]
         np.testing.assert_allclose(observed.pass_through, observed.out_amount / observed.in_amount)
+
+        classified = self.nodes_roles.set_index("gid")
+        seeds = classified.loc[result.loc[result.is_seed, "gid"]]
+        self.assertEqual(len(seeds), 81)
+        self.assertFalse(seeds.role.isin({"terminal", "transit"}).any())
+        self.assertTrue(seeds.evidence.str.contains("входящие неполны", regex=False).all())
+        boundary_roles = classified.loc[result.loc[boundary, "gid"]]
+        self.assertEqual(len(boundary_roles), 444)
+        self.assertTrue(boundary_roles.role.eq("peripheral").all())
+        self.assertTrue(boundary_roles.evidence.str.contains("границы выгрузки", regex=False).all())
 
     def test_complete_pipeline_finishes_within_five_minutes(self):
         self.assertLess(self.pipeline_seconds, 300, f"Pipeline took {self.pipeline_seconds:.2f}s")
@@ -403,7 +416,65 @@ class PipelineIntegrationTests(unittest.TestCase):
         self.assertListEqual(list(self.clusters.columns), expected_cols)
         self.assertTrue(self.clusters["cluster_id"].is_unique)
         self.assertEqual(self.clusters["n_nodes"].sum(), len(self.nodes))
+        self.assertEqual(self.clusters["n_seed"].sum(), 81)
         self.assertFalse(self.clusters[expected_cols].isna().any().any())
+
+    def test_cluster_membership_seeds_and_top_gids_match_node_reports(self):
+        cluster_ids = set(self.clusters.cluster_id)
+        self.assertEqual(set(self.nodes_roles.cluster_id), cluster_ids)
+        seed_gids = set(self.nodes.loc[self.nodes.is_seed, "gid"])
+        for cluster in self.clusters.itertuples(index=False):
+            with self.subTest(cluster_id=cluster.cluster_id):
+                members = set(self.nodes_roles.loc[
+                    self.nodes_roles.cluster_id.eq(cluster.cluster_id), "gid"
+                ])
+                self.assertEqual(cluster.n_nodes, len(members))
+                self.assertEqual(cluster.n_seed, len(members & seed_gids))
+                top_gids = [int(gid) for gid in str(cluster.top_gids).split(";")]
+                self.assertEqual(len(top_gids), min(5, len(members)))
+                self.assertEqual(len(set(top_gids)), len(top_gids))
+                self.assertTrue(set(top_gids).issubset(members))
+
+    def test_cluster_turnover_reconciles_source_directed_edges_to_the_cent(self):
+        cluster_by_gid = self.nodes_roles.set_index("gid").cluster_id.to_dict()
+        expected = {cluster_id: Decimal(0) for cluster_id in self.clusters.cluster_id}
+        for edge in self.edges.itertuples(index=False):
+            source_cluster = cluster_by_gid[edge.src]
+            if source_cluster == cluster_by_gid[edge.dst]:
+                # Count each original directed aggregate once, including any
+                # self-loop; using projection weights here could double amounts.
+                expected[source_cluster] += Decimal(str(edge.sum_kzt))
+        for cluster in self.clusters.itertuples(index=False):
+            with self.subTest(cluster_id=cluster.cluster_id):
+                self.assertEqual(
+                    Decimal(str(cluster.sum_kzt_internal)),
+                    expected[cluster.cluster_id].quantize(Decimal("0.01")),
+                )
+
+    def test_cluster_turnover_counts_reciprocal_transfers_and_self_loops_once(self):
+        # The supplied dataset has no loops, so exercise this aggregation case
+        # separately with exact, hand-checkable totals.
+        nodes = pd.DataFrame({
+            "gid": [1, 2, 3], "depth": [1, 2, 0], "is_seed": [False, False, True],
+        })
+        edges = pd.DataFrame({
+            "src": [1, 2, 1, 3], "dst": [2, 1, 1, 3],
+            "sum_kzt": [100.0, 20.0, 7.0, 11.0],
+            "n_tx": [1, 1, 1, 1], "depth": [2, 2, 1, 0],
+        })
+        graph = graph_builder.build_graph(edges, nodes)
+        calculated = metrics.compute_node_metrics(graph, nodes, edges)
+        assignments, clusters = pipeline.analyze(
+            calculated.to_dict(orient="records"),
+            [(str(edge.src), str(edge.dst), edge.sum_kzt) for edge in edges.itertuples(index=False)],
+        )
+        membership = {row["gid"]: row["cluster_id"] for row in assignments}
+        summaries = {row["cluster_id"]: row for row in clusters}
+        self.assertEqual(membership["1"], membership["2"])
+        self.assertNotEqual(membership["1"], membership["3"])
+        self.assertEqual(summaries[membership["1"]]["sum_kzt_internal"], 127.0)
+        self.assertEqual(summaries[membership["3"]]["sum_kzt_internal"], 11.0)
+        self.assertEqual(sum(row["sum_kzt_internal"] for row in clusters), 138.0)
 
     def test_top_nodes_contract(self):
         expected_cols = ["rank", "gid", "role", "priority_score", "why"]

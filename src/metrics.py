@@ -13,13 +13,18 @@ except ImportError:  # Direct `python src/pipeline.py` entry point.
 
 METRIC_COLUMNS = [
     "gid", "depth", "is_seed", "in_degree", "out_degree", "in_amount", "out_amount",
-    "in_tx_count", "out_tx_count", "unique_senders", "unique_receivers", "pass_through",
+    "in_tx_count", "out_tx_count", "unique_senders", "unique_receivers", "pass_ratio", "pass_through",
     "pagerank", "betweenness", "truncated_by_depth",
 ]
 
 
 def compute_node_metrics(G: nx.DiGraph, nodes: pd.DataFrame, edges: pd.DataFrame) -> pd.DataFrame:
-    """One row per gid; `truncated_by_depth` flags censored leaves explicitly."""
+    """One row per gid; `truncated_by_depth` flags censored leaves explicitly.
+
+    `pass_ratio` is the analytics contract's name for observed outflow / inflow;
+    `pass_through` is retained as an identical alias for existing integrations.
+    Both are undefined for seeds or nodes with no observed inflow.
+    """
     node = validate_nodes(nodes)[["gid", "depth", "is_seed"]].copy()
     edges = validate_edges(edges, node)
     if not G.is_directed() or G.is_multigraph():
@@ -67,6 +72,7 @@ def compute_node_metrics(G: nx.DiGraph, nodes: pd.DataFrame, edges: pd.DataFrame
     )
     # Suppress misleading ratios on seeds: their incoming history lies outside the extract.
     f.loc[f.is_seed, "pass_through"] = np.nan
+    f["pass_ratio"] = f["pass_through"]
 
     pr = nx.pagerank(G, weight="sum_kzt") if G.number_of_nodes() else {}
     f["pagerank"] = f.gid.map(pr).fillna(0.0)

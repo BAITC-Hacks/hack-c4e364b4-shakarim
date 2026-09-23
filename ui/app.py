@@ -18,6 +18,7 @@ import pandas as pd
 import streamlit as st
 
 from components import (
+    ROLE_COLORS,
     inject_styles,
     investigation_brief,
     normalise_id,
@@ -33,8 +34,8 @@ from components import (
     render_top_nodes,
 )
 from graph_view import load_edges, render_client_connections
-from data_access import DATA_DIR, RESULTS_DIR, read_source, raw_profiles
-from insights import render_observed, render_connections_table, render_timeline, render_catalog
+from data_access import DATA_DIR, RESULTS_DIR, read_source, raw_profiles, validate_analysis_context, file_signature
+from insights import render_collection_caveats, render_observed, render_connections_table, render_timeline, render_catalog
 
 
 NODE_COLUMNS = {"gid", "role", "role_score", "priority_score", "cluster_id", "evidence"}
@@ -56,16 +57,21 @@ def demo_results() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFra
     return tuple(tables)
 
 
-@st.cache_data(ttl=20, show_spinner=False)
 def read_result(filename: str, directory: Path | None = None) -> tuple[pd.DataFrame, str | None]:
     """Read a ready export with a short cache; no scores are calculated here."""
     path = (directory if directory is not None else RESULTS_DIR) / filename
+    return _read_result(str(path), file_signature(path))
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def _read_result(filename: str, signature: tuple | None) -> tuple[pd.DataFrame, str | None]:
+    path = Path(filename)
     if not path.exists():
-        return pd.DataFrame(), f"Не найден {filename}"
+        return pd.DataFrame(), f"Не найден {path.name}"
     try:
         return pd.read_csv(path, encoding="utf-8-sig", dtype={"gid": "string", "cluster_id": "string", "top_gids": "string", "src": "string", "dst": "string"}), None
     except Exception:
-        return pd.DataFrame(), f"Не удалось прочитать {filename}"
+        return pd.DataFrame(), f"Не удалось прочитать {path.name}"
 
 
 def validate_nodes(nodes: pd.DataFrame) -> list[str]:
@@ -81,10 +87,14 @@ def validate_nodes(nodes: pd.DataFrame) -> list[str]:
     for column in NODE_COLUMNS - {"gid"}:
         if nodes[column].isna().any() or nodes[column].astype(str).str.strip().eq("").any():
             issues.append(f"Есть пустые значения в {column}")
-    for column, maximum in (("role_score", 1), ("priority_score", 100)):
+    for column, maximum in (("role_score", 1), ("priority_score", 1)):
         values = pd.to_numeric(nodes[column], errors="coerce")
         if not values.between(0, maximum).all():
             issues.append(f"{column}: требуются числа от 0 до {maximum}")
+    if not nodes.role.isin(ROLE_COLORS).all():
+        issues.append("role: требуется одна из шести документированных ролей")
+    if nodes.evidence.astype(str).str.len().gt(200).any():
+        issues.append("evidence: объяснение должно содержать не более 200 символов")
     return issues
 
 
@@ -186,7 +196,10 @@ def main() -> None:
     pipeline_top, top_error = read_result("top_nodes.csv", active_dir)
     pipeline_nodes = prepare_nodes(pipeline_nodes)
     validation_issues = validate_nodes(pipeline_nodes) if not pipeline_nodes.empty else []
-    source_nodes, source_error = (pd.DataFrame(), None) if demo_mode else read_source("nodes")
+    source_verified, source_issue = False, None
+    if not demo_mode and not raw_mode:
+        source_verified, source_issue = validate_analysis_context(active_dir, DATA_DIR)
+    source_nodes, source_error = read_source("nodes") if raw_mode or source_verified else (pd.DataFrame(), None)
 
     metadata_issues = []
     if raw_mode:
@@ -225,7 +238,8 @@ def main() -> None:
         top_nodes = top_nodes.copy()
         top_nodes["priority_score"] = pd.to_numeric(top_nodes.priority_score, errors="coerce")
         top_nodes["rank"] = pd.to_numeric(top_nodes["rank"], errors="coerce")
-        valid_top = (top_nodes.priority_score.between(0, 100) & top_nodes.gid.map(normalise_id).isin(nodes._gid_key)
+        valid_top = (top_nodes.priority_score.between(0, 1) & top_nodes.gid.map(normalise_id).isin(nodes._gid_key)
+                     & top_nodes.role.isin(ROLE_COLORS)
                      & top_nodes["rank"].gt(0) & top_nodes["rank"].mod(1).eq(0))
         if not valid_top.all():
             optional_issues.append("top_nodes.csv: некорректные места, скоры или неизвестные gid")
@@ -233,14 +247,11 @@ def main() -> None:
             optional_issues.append("top_nodes.csv: повторяющиеся gid или места в очереди")
         top_nodes = top_nodes.loc[valid_top].drop_duplicates("gid").sort_values("rank", kind="stable")
         top_nodes["rank"] = top_nodes["rank"].astype(int)
-    # Display the analytics team's legacy /100 export unchanged. This is a
-    # presentation scale, not a priority calculation or normalization.
-    priority_maximum = 100 if (nodes.priority_score.gt(1).any() or
-        (not top_nodes.empty and (top_nodes.priority_score.gt(1).any() or top_nodes.why.astype(str).str.contains("/100", regex=False).any()))) else 1
+    priority_maximum = 1
 
     edge_candidates = [MOCK_DIR / "edges.csv"] if demo_mode else ([DATA_DIR / "edges.parquet"] if raw_mode else [
-        RESULTS_DIR / "edges.parquet", RESULTS_DIR / "edges.csv",
-        DATA_DIR / "edges.parquet",
+        RESULTS_DIR / "edges.csv", RESULTS_DIR / "edges.parquet",
+        *([DATA_DIR / "edges.parquet"] if source_verified else []),
     ])
     edges, edge_path = load_edges(tuple(edge_candidates))
 
@@ -321,6 +332,8 @@ def main() -> None:
     )
     for issue in metadata_issues:
         st.warning(issue)
+    if source_issue:
+        st.warning(source_issue)
     if demo_mode:
         render_demo_banner(data_message)
     elif raw_mode:
@@ -329,16 +342,6 @@ def main() -> None:
             st.warning(nodes_error + ". Отображаются только исходные данные.")
     elif clusters_error or top_error or optional_issues:
         st.warning("Часть готовых выгрузок пока недоступна или не соответствует контракту: интерфейс показывает только доступные результаты.")
-    contract_notes = []
-    if priority_maximum == 100:
-        contract_notes.append("Пайплайн передал приоритет в шкале 0–100. UI показывает его без пересчёта. Для итоговой сдачи по ТЗ аналитический экспорт должен использовать шкалу 0–1.")
-    if not raw_mode and nodes.evidence.astype(str).str.len().gt(200).any():
-        contract_notes.append("В CSV есть evidence длиннее 200 символов. UI показывает полный текст без изменений; перед сдачей команда аналитики должна сократить объяснения до лимита ТЗ.")
-    if contract_notes:
-        with st.sidebar:
-            with st.expander(f"Качество выгрузки · {len(contract_notes)} замечания"):
-                for note in contract_notes:
-                    st.warning(note)
     if edges.attrs.get("load_error"):
         st.warning(edges.attrs["load_error"])
     if not demo_mode and not raw_mode and len(top_nodes) < 20:
@@ -363,6 +366,7 @@ def main() -> None:
             st.caption("Роль — гипотеза для проверки. Оценка роли не является вероятностью нарушения.")
             st.download_button("Скачать сводку по GID", investigation_brief(selected, reason, edges, source_label, priority_maximum).encode("utf-8"),
                                file_name=f"traceflow_{current_gid}.md", mime="text/markdown", width="stretch")
+            render_collection_caveats(selected)
             if not edges.attrs.get("load_error"):
                 render_observed(selected, edges)
             if not raw_mode:
@@ -375,7 +379,7 @@ def main() -> None:
             if not edges.attrs.get("load_error"):
                 render_connections_table(selected["gid"], edges, nodes)
             if not demo_mode:
-                transactions, tx_error = read_source("transactions")
+                transactions, tx_error = read_source("transactions") if raw_mode or source_verified else (pd.DataFrame(), source_issue)
                 render_timeline(selected["gid"], transactions, tx_error)
     with priorities:
         render_top_nodes(top_nodes, priority_maximum=priority_maximum, key="all_top")

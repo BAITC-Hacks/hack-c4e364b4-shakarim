@@ -1,7 +1,7 @@
 """Regression tests for the analytics owned by DEV 2.
 
 Run with: python3.12 -m unittest discover -s tests -v
-Only the Python standard library is required.
+Install the project dependencies before running this suite.
 """
 from __future__ import annotations
 
@@ -17,16 +17,18 @@ sys.path.insert(0, str(ROOT / "src"))
 from clustering import louvain
 from export import CLUSTERS_COLUMNS, NODES_ROLES_COLUMNS, TOP_NODES_COLUMNS
 from pipeline import analyze, main, parse_edges
-from priority import priority_score
+from priority import priority_components, priority_score
 from roles import MAX_EVIDENCE_LENGTH, ROLE_RULES, classify
 
 
 class RoleClassificationTests(unittest.TestCase):
     def test_role_rules_are_documented_in_evaluation_order(self):
-        self.assertEqual(len(ROLE_RULES), 7)
+        self.assertEqual(len(ROLE_RULES), 8)
         self.assertTrue(ROLE_RULES[0].startswith("peripheral"))
-        self.assertTrue(ROLE_RULES[1].startswith("terminal"))
-        self.assertTrue(ROLE_RULES[2].startswith("coordinator"))
+        self.assertIn("censored", ROLE_RULES[0])
+        self.assertTrue(ROLE_RULES[1].startswith("peripheral"))
+        self.assertTrue(ROLE_RULES[2].startswith("terminal"))
+        self.assertTrue(ROLE_RULES[3].startswith("coordinator"))
 
     def test_assigns_each_of_six_roles_for_explainable_examples(self):
         examples = {
@@ -82,11 +84,16 @@ class RoleClassificationTests(unittest.TestCase):
 
 
 class PriorityTests(unittest.TestCase):
-    def test_seed_adds_one_tenth_and_score_is_bounded(self):
+    def test_seed_bonus_does_not_reward_unreliable_imbalance(self):
         metrics = {"in_amount": 500_000, "out_amount": 250_000, "unique_senders": 4, "unique_receivers": 5}
         without_seed = priority_score(metrics)
         with_seed = priority_score({**metrics, "is_seed": "true"})
-        self.assertAlmostEqual(with_seed - without_seed, .1, places=3)
+        components = priority_components({**metrics, "is_seed": "true"})
+        self.assertEqual(components["seed"], .1)
+        self.assertEqual(components["imbalance"], 0)
+        self.assertEqual(with_seed, round(sum(components.values()), 3))
+        self.assertAlmostEqual(with_seed - without_seed,
+                               .1 - priority_components(metrics)["imbalance"], places=3)
         self.assertGreaterEqual(with_seed, 0)
         self.assertLessEqual(with_seed, 1)
 
@@ -155,9 +162,9 @@ class PipelineTests(unittest.TestCase):
             result = main(["--input", str(input_path), "--output-dir", str(output_dir)])
             self.assertEqual(result, 0)
             expected_headers = {
-                "nodes_roles.csv": NODES_ROLES_COLUMNS,
-                "clusters.csv": CLUSTERS_COLUMNS,
-                "top_nodes.csv": TOP_NODES_COLUMNS,
+                "nodes_roles.csv": ("gid", "role", "role_score", "cluster_id", "priority_score", "evidence"),
+                "clusters.csv": ("cluster_id", "n_nodes", "n_seed", "sum_kzt_internal", "top_gids", "hypothesis"),
+                "top_nodes.csv": ("rank", "gid", "role", "priority_score", "why"),
             }
             for filename, headers in expected_headers.items():
                 with self.subTest(file=filename):
@@ -170,7 +177,7 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual([row["rank"] for row in csv.DictReader(stream)], [str(i) for i in range(1, 26)])
 
     def test_pipeline_rejects_fewer_than_twenty_nodes(self):
-        fields = ["gid", "in_amount", "out_amount"]
+        fields = ["gid", "in_amount", "out_amount", "unique_senders", "unique_receivers"]
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
             input_path = temp / "small.csv"
@@ -178,7 +185,8 @@ class PipelineTests(unittest.TestCase):
                 writer = csv.DictWriter(stream, fieldnames=fields)
                 writer.writeheader()
                 for index in range(19):
-                    writer.writerow({"gid": index, "in_amount": 10, "out_amount": 5})
+                    writer.writerow({"gid": index, "in_amount": 10, "out_amount": 5,
+                                     "unique_senders": 1, "unique_receivers": 1})
             self.assertEqual(main(["--input", str(input_path), "--output-dir", str(temp / "out")]), 2)
             self.assertFalse((temp / "out" / "top_nodes.csv").exists())
 

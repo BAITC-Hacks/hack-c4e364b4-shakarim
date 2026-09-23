@@ -1,52 +1,44 @@
-"""Deterministic Louvain-style clustering on a weighted undirected projection.
+"""Full weighted Louvain on an undirected projection; metrics stay directed.
 
-Each directed transaction ``source -> target`` contributes its weight to the same
-undirected ``{source, target}`` edge. Direction remains available in node metrics
-and is not used to alter community membership.
+Parallel and reciprocal transfers are summed into one undirected edge. Self
+transfers contribute to financial totals, but not to community discovery.
+Sorted insertion and a fixed seed make the result reproducible for a dataset.
 """
 from __future__ import annotations
 
 from collections import defaultdict
+import math
+
+import networkx as nx
+
+
+def weighted_projection(nodes, edges):
+    """Build only the clustering projection, without recalculating node metrics."""
+    graph = nx.Graph()
+    graph.add_nodes_from(sorted({str(node) for node in nodes}))
+    amounts = defaultdict(list)
+    for source, target, weight in edges:
+        source, target = str(source), str(target)
+        if source not in graph or target not in graph:
+            raise ValueError("Ребро ссылается на gid вне node_metrics.csv.")
+        weight = float(weight)
+        if not math.isfinite(weight) or weight < 0:
+            raise ValueError("Вес ребра должен быть конечным неотрицательным числом.")
+        if source != target and weight > 0:
+            amounts[tuple(sorted((source, target)))].append(weight)
+    for (source, target), weights in sorted(amounts.items()):
+        graph.add_edge(source, target, weight=math.fsum(sorted(weights)))
+    return graph
 
 
 def louvain(nodes, edges):
-    """Return stable communities from directed weighted edges projected to undirected."""
-    graph = {str(n): defaultdict(float) for n in nodes}
-    for source, target, weight in edges:
-        source, target, weight = str(source), str(target), float(weight)
-        if source == target or weight <= 0:
-            continue
-        graph.setdefault(source, defaultdict(float))[target] += weight
-        graph.setdefault(target, defaultdict(float))[source] += weight
-    degree = {node: sum(neighbors.values()) for node, neighbors in graph.items()}
-    m2 = sum(degree.values())
-    if m2 == 0:
-        return {node: i + 1 for i, node in enumerate(sorted(graph))}
-    community = {node: i for i, node in enumerate(sorted(graph))}
-    # Local move step of Louvain. Modularity gain is proportional to k_i,in - k_i*tot_c/m.
-    for _ in range(100):
-        changed = False
-        for node in sorted(graph):
-            old = community[node]
-            weights_by_comm = defaultdict(float)
-            for neighbor, weight in graph[node].items():
-                weights_by_comm[community[neighbor]] += weight
-            community[node] = -1
-            totals = defaultdict(float)
-            for member, comm in community.items():
-                if comm >= 0:
-                    totals[comm] += degree[member]
-            best, best_gain = old, 0.0
-            for candidate in sorted(weights_by_comm):
-                gain = weights_by_comm[candidate] - degree[node] * totals[candidate] / m2
-                if gain > best_gain + 1e-12:
-                    best, best_gain = candidate, gain
-            community[node] = best
-            changed |= best != old
-        if not changed:
-            break
-    groups = defaultdict(list)
-    for node, comm in community.items():
-        groups[comm].append(node)
-    ordered = sorted(groups.values(), key=lambda group: min(group))
-    return {node: i + 1 for i, group in enumerate(ordered) for node in group}
+    """Return stable IDs using multilevel Louvain (resolution=1, seed=42)."""
+    graph = weighted_projection(nodes, edges)
+    isolates = [{node} for node in nx.isolates(graph)]
+    active = graph.subgraph([node for node, degree in graph.degree() if degree]).copy()
+    communities = (
+        nx.community.louvain_communities(active, weight="weight", resolution=1, seed=42)
+        if active.number_of_edges() else []
+    )
+    ordered = sorted(communities + isolates, key=lambda group: min(group))
+    return {node: index for index, group in enumerate(ordered, start=1) for node in sorted(group)}

@@ -1,0 +1,8 @@
+# Direct runtime dependencies used by the verified Python 3.12 environment.
+# No API keys or external services are required to run the application.
+streamlit==1.64.0
+pandas==3.0.6
+pyarrow==25.0.1
+networkx==3.7
+numpy==2.5.3
+scipy==1.18.1

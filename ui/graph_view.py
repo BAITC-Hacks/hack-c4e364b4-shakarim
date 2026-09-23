@@ -11,11 +11,16 @@ import pandas as pd
 import streamlit as st
 
 from components import format_money, normalise_id, open_selected_client, role_color, role_label
+from data_access import file_signature
+
+
+def load_edges(candidates: tuple[Path, ...]) -> tuple[pd.DataFrame, Path | None]:
+    """Load a ready edge export once, retaining only fields needed for presentation."""
+    return _load_edges(candidates, tuple(file_signature(path) for path in candidates))
 
 
 @st.cache_data(ttl=20, show_spinner=False)
-def load_edges(candidates: tuple[Path, ...]) -> tuple[pd.DataFrame, Path | None]:
-    """Load a ready edge export once, retaining only fields needed for presentation."""
+def _load_edges(candidates: tuple[Path, ...], signatures: tuple) -> tuple[pd.DataFrame, Path | None]:
     def unavailable(message: str):
         empty = pd.DataFrame(columns=["src", "dst"])
         empty.attrs["load_error"] = message
