@@ -13,9 +13,12 @@ venv/
 .idea/
 .vscode/
 
-# The small supplied dataset is versioned under data/. Results are regenerated
-# by the owning branches and exchanged through output/, never source code.
+# Version the supplied dataset and the three required submission reports.
+# Auxiliary exports and the machine-specific run context are regenerated locally.
 /output/*.csv
+!/output/nodes_roles.csv
+!/output/clusters.csv
+!/output/top_nodes.csv
 /output/*.parquet
 /output/analysis_context.json
 __MACOSX/

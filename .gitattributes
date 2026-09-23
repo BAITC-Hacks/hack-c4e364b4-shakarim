@@ -1,0 +1,4 @@
+# Preserve the CRLF record separators emitted by Python's CSV writer on checkout.
+output/nodes_roles.csv text eol=crlf
+output/clusters.csv text eol=crlf
+output/top_nodes.csv text eol=crlf

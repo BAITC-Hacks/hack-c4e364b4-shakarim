@@ -52,6 +52,12 @@ python run.py
 `--analysis-only` сохраняет CSV без UI, `--ui-only` открывает готовые результаты.
 Можно задать `--data`, `--output-dir`, `--port` и `--headless`.
 
+После нового клонирования доступны три сохранённых в Git отчёта: `--ui-only`
+покажет роли, кластеры и TOP. Для связей, метаданных seed/depth и дневной истории
+сначала выполните полный `python run.py` либо `python run.py --analysis-only`.
+Этот расчёт создаст локальные метрики, рёбра и контекст, который подтверждает
+принадлежность исходных Parquet и отчётов одному запуску.
+
 Pipeline проверяет исходные данные, рассчитывает метрики и аналитику, сохраняет
 пять CSV: `node_metrics.csv`, `edges.csv`, `nodes_roles.csv`, `clusters.csv`,
 `top_nodes.csv`, а также `analysis_context.json`. В интерфейсе нажмите
@@ -115,5 +121,9 @@ python -m unittest discover -s tests -v
 У seed `pass_ratio` и `pass_through` отсутствуют, узлы `depth >= 4` без исходящих связей
 не получают роль `terminal` по отсутствию исходящего потока.
 
-Сгенерированные CSV и JSON-контекст оставлены локально в `output/` и исключены из Git.
+В Git включены готовые отчёты по приложенному датасету:
+[nodes_roles.csv](../output/nodes_roles.csv), [clusters.csv](../output/clusters.csv)
+и [top_nodes.csv](../output/top_nodes.csv). Полный запуск воспроизводит эти отчёты.
+Вспомогательные `node_metrics.csv`, `edges.csv` и `analysis_context.json` создаются
+локально в `output/` и исключены из Git.
 Синтетический `mock/` версионируется и обеспечивает независимый запуск UI.
