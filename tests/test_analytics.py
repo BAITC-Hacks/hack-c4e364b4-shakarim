@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from clustering import louvain
-from pipeline import main
+from pipeline import analyze, main
 from priority import priority_score
 from roles import classify
 
@@ -79,6 +79,12 @@ class ClusteringTests(unittest.TestCase):
 
 
 class PipelineTests(unittest.TestCase):
+    def test_requires_one_precomputed_metrics_row_per_gid(self):
+        with self.assertRaisesRegex(ValueError, "должна содержать gid"):
+            analyze([{"source_gid": "a", "target_gid": "b", "amount_kzt": 10}])
+        with self.assertRaisesRegex(ValueError, "повторяется gid"):
+            analyze([{"gid": "a"}, {"gid": "a"}])
+
     def test_exports_required_files_and_top_twenty_from_node_metrics(self):
         fields = ["gid", "depth", "is_seed", "in_degree", "out_degree", "in_amount", "out_amount",
                   "unique_senders", "unique_receivers", "in_tx_count", "out_tx_count", "pass_ratio",

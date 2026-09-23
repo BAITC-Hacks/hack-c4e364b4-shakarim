@@ -1,4 +1,4 @@
-"""Run the complete explainable node analytics pipeline.
+"""Analyze precomputed per-node metrics without rebuilding the transaction graph.
 
 Usage from repository root: python3 src/pipeline.py [--input PATH] [--output-dir output]
 """
@@ -10,15 +10,12 @@ from collections import Counter, defaultdict
 from pathlib import Path
 import sys
 
-from clustering import louvain
 from export import export
 from priority import priority_score
-from roles import classify, is_seed, key_name, number
+from roles import classify, is_seed, key_name
 
 
 GID_NAMES = {"gid", "node_id", "node", "account_id"}
-SOURCE_NAMES = {"source", "source_gid", "src", "from_gid", "sender_gid", "from"}
-TARGET_NAMES = {"target", "target_gid", "dst", "to_gid", "receiver_gid", "to"}
 
 
 def find_value(row, names):
@@ -39,37 +36,21 @@ def load_input(path):
 
 
 def analyze(rows):
-    metrics, edge_rows = {}, []
+    metrics = {}
     for row in rows:
         gid = str(find_value(row, GID_NAMES)).strip()
-        source, target = str(find_value(row, SOURCE_NAMES)).strip(), str(find_value(row, TARGET_NAMES)).strip()
-        if source and target:
-            edge_rows.append((source, target, max(0.0, number(row, "amount"))))
-        if gid:
-            metrics[gid] = row
-        elif not (source and target):
-            raise ValueError("Для каждой строки CSV требуется gid/node_id или пара source/target.")
-    if not metrics and not edge_rows:
-        raise ValueError("Не найдены узлы или транзакционные рёбра.")
-    # Derive consistent count and amount metrics from a transaction edge list when present.
-    derived = defaultdict(lambda: {"in_amount": 0.0, "out_amount": 0.0, "in_count": 0,
-                                   "out_count": 0, "senders": set(), "receivers": set()})
-    for source, target, amount in edge_rows:
-        derived[source]["out_amount"] += amount
-        derived[source]["out_count"] += 1
-        derived[source]["receivers"].add(target)
-        derived[target]["in_amount"] += amount
-        derived[target]["in_count"] += 1
-        derived[target]["senders"].add(source)
-    all_gids = sorted(set(metrics) | {x for edge in edge_rows for x in edge[:2]})
-    # A node-level aggregate file may already contain unique degree counts; preserve those.
-    for gid in all_gids:
-        if gid not in metrics:
-            d = derived[gid]
-            metrics[gid] = {"gid": gid, "in_amount": d["in_amount"], "out_amount": d["out_amount"],
-                            "in_count": d["in_count"], "out_count": d["out_count"],
-                            "unique_senders": len(d["senders"]), "unique_receivers": len(d["receivers"])}
-    cluster_map = louvain(all_gids, edge_rows)
+        if not gid:
+            raise ValueError("Ожидается node_metrics.csv: каждая строка должна содержать gid.")
+        if gid in metrics:
+            raise ValueError(f"В node_metrics.csv повторяется gid={gid}; ожидается одна строка на узел.")
+        metrics[gid] = row
+    if not metrics:
+        raise ValueError("node_metrics.csv не содержит строк с узлами.")
+
+    all_gids = sorted(metrics)
+    # Aggregated node metrics do not contain transaction endpoints. Do not construct an
+    # inferred graph: until community IDs are supplied, use explicit singleton fallbacks.
+    cluster_map = {gid: index for index, gid in enumerate(all_gids, start=1)}
     node_results = []
     for gid in all_gids:
         row = metrics[gid]
@@ -82,20 +63,13 @@ def analyze(rows):
     for row in node_results:
         grouped[row["cluster_id"]].append(row)
     internal = defaultdict(float)
-    for source, target, amount in edge_rows:
-        if cluster_map[source] == cluster_map[target]:
-            internal[cluster_map[source]] += amount
     clusters = []
     for cluster_id, members in sorted(grouped.items()):
         roles = Counter(row["role"] for row in members)
         dominant, count = roles.most_common(1)[0]
         seed_count = sum(row["_seed"] for row in members)
-        if edge_rows:
-            hypothesis = (f"Преобладает роль {dominant} ({count}/{len(members)} узлов); "
-                          f"обнаружено seed-узлов: {seed_count}.")
-        else:
-            hypothesis = (f"Связи отсутствуют во входном CSV; сетевой Louvain недоступен. "
-                          f"Преобладает роль {dominant} ({count}/{len(members)} узлов); seed: {seed_count}.")
+        hypothesis = (f"В node_metrics.csv нет исходных связей; узел оставлен в отдельном кластере. "
+                      f"Роль: {dominant}; seed-узлов: {seed_count}.")
         top = sorted(members, key=lambda row: (-row["priority_score"], row["gid"]))[:5]
         clusters.append({"cluster_id": cluster_id, "n_nodes": len(members), "n_seed": seed_count,
                          "sum_kzt_internal": round(internal[cluster_id], 2),
@@ -109,7 +83,7 @@ def analyze(rows):
 def main(argv=None):
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, help="CSV узлов или транзакций")
+    parser.add_argument("--input", type=Path, help="node_metrics.csv (одна агрегированная строка на gid)")
     parser.add_argument("--output-dir", type=Path, default=root / "output")
     args = parser.parse_args(argv)
     if args.input:
