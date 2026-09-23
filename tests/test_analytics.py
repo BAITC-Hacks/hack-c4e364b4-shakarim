@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from clustering import louvain
 from pipeline import analyze, main
 from priority import priority_score
-from roles import ROLE_RULES, classify
+from roles import MAX_EVIDENCE_LENGTH, ROLE_RULES, classify
 
 
 class RoleClassificationTests(unittest.TestCase):
@@ -43,6 +43,16 @@ class RoleClassificationTests(unittest.TestCase):
                 self.assertGreaterEqual(score, 0.05)
                 self.assertLessEqual(score, 1.0)
                 self.assertTrue(evidence)
+                self.assertLessEqual(len(evidence), MAX_EVIDENCE_LENGTH)
+
+    def test_evidence_has_concrete_values_and_is_at_most_two_hundred_characters(self):
+        _, _, evidence = classify({
+            "in_amount": 10_000, "out_amount": 9_200, "unique_senders": 4,
+            "unique_receivers": 4, "in_tx_count": 4, "out_tx_count": 4,
+        })
+        self.assertIn("10,000", evidence)
+        self.assertIn("92%", evidence)
+        self.assertLessEqual(len(evidence), 200)
 
     def test_terminal_precedes_consolidator_for_low_pass_through(self):
         role, _, evidence = classify({

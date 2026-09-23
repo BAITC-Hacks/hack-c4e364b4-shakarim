@@ -50,6 +50,13 @@ ROLE_RULES = (
     "peripheral: fallback",
 )
 
+MAX_EVIDENCE_LENGTH = 200
+
+
+def evidence_text(text: str) -> str:
+    """Keep an analyst-facing explanation compact for CSV and UI cards."""
+    return text if len(text) <= MAX_EVIDENCE_LENGTH else f"{text[:MAX_EVIDENCE_LENGTH - 1].rstrip()}…"
+
 
 def number(row: Mapping, metric: str) -> float:
     names = ALIASES.get(metric, (metric,))
@@ -126,5 +133,5 @@ def classify(row: Mapping) -> tuple[str, float, str]:
     else:
         evidence = f"Небольшая активность: {int(senders)} уникальных отправителей, {int(receivers)} получателей, оборот {total:,.0f} KZT."
     if depth >= 4 and out_degree == 0:
-        evidence += " На глубине 4 отсутствие исходящих связей может быть следствием границы выгрузки и само по себе не подтверждает terminal-роль."
-    return role, score, evidence
+        evidence += " Глубина 4: 0 исходящих может быть следствием границы выгрузки; terminal не подтверждён."
+    return role, score, evidence_text(evidence)
