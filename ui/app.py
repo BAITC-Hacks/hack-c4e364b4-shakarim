@@ -249,7 +249,21 @@ def main() -> None:
     )
     st.session_state.traceflow_active_gid = normalise_id(selected["gid"])
 
-    render_hero(demo_mode, len(nodes), len(edges), len(top_nodes), raw_mode=raw_mode)
+    transaction_count = None
+    total_amount = None
+    if not edges.empty and "n_tx" in edges:
+        transaction_count = int(pd.to_numeric(edges["n_tx"], errors="coerce").fillna(0).sum())
+    if not edges.empty and "sum_kzt" in edges:
+        total_amount = float(pd.to_numeric(edges["sum_kzt"], errors="coerce").fillna(0).sum())
+    render_hero(
+        demo_mode,
+        len(nodes),
+        len(edges),
+        len(top_nodes),
+        raw_mode=raw_mode,
+        n_transactions=transaction_count,
+        total_amount=total_amount,
+    )
     if demo_mode:
         render_demo_banner(data_message)
     elif raw_mode:

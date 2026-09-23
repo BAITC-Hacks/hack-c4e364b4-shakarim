@@ -118,7 +118,7 @@ def inject_styles() -> None:
         .live-pill i { width:6px; height:6px; border-radius:50%; background:#4DE2A8; box-shadow:0 0 0 4px #4de2a822; animation:pulse 1.8s infinite; }
         .demo-pill { border-color:#6E5426; background:#342916aa; color:#FFD28B; }
         .demo-pill i { background:#FFB54D; box-shadow:0 0 0 4px #ffb54d22; }
-        .stat-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:.7rem; margin-bottom:1.25rem; }
+        .stat-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:.7rem; margin-bottom:1.25rem; }
         .stat-tile { background:linear-gradient(145deg,#121A2A,#0E1421); border:1px solid #222E45; border-radius:14px; padding:.85rem .95rem; }
         .stat-name { color:#8592AC; font-size:.67rem; font-weight:700; letter-spacing:.07em; text-transform:uppercase; }
         .stat-value { color:#F3F6FF; font-size:1.35rem; font-weight:720; letter-spacing:-.05em; margin-top:.28rem; }
@@ -189,7 +189,15 @@ def render_brand() -> None:
     )
 
 
-def render_hero(demo_mode: bool, n_nodes: int, n_edges: int, n_top: int, raw_mode: bool = False) -> None:
+def render_hero(
+    demo_mode: bool,
+    n_nodes: int,
+    n_edges: int,
+    n_top: int,
+    raw_mode: bool = False,
+    n_transactions: int | None = None,
+    total_amount: float | None = None,
+) -> None:
     mode_class = "demo-pill" if demo_mode else ""
     mode_text = "ДЕМО-КЕЙС" if demo_mode else "ДАННЫЕ ЗАГРУЖЕНЫ"
     if raw_mode:
@@ -199,6 +207,15 @@ def render_hero(demo_mode: bool, n_nodes: int, n_edges: int, n_top: int, raw_mod
     nodes_label = f"{n_nodes:,}".replace(",", " ")
     edges_label = f"{n_edges:,}".replace(",", " ")
     top_label = f"{n_top:,}".replace(",", " ")
+    transaction_label = f"{n_transactions:,}".replace(",", " ") if n_transactions is not None else "n/a"
+    if total_amount is None or pd.isna(total_amount):
+        amount_label = "n/a"
+    elif abs(total_amount) >= 1_000_000:
+        amount_label = f"{total_amount / 1_000_000:,.1f} M KZT".replace(",", " ")
+    elif abs(total_amount) >= 1_000:
+        amount_label = f"{total_amount / 1_000:,.1f} K KZT".replace(",", " ")
+    else:
+        amount_label = f"{total_amount:,.0f} KZT"
     st.markdown(
         f"""
         <div class="hero">
@@ -208,6 +225,8 @@ def render_hero(demo_mode: bool, n_nodes: int, n_edges: int, n_top: int, raw_mod
         <div class="stat-grid">
           <div class="stat-tile"><div class="stat-name">Клиенты в контуре</div><div class="stat-value">{nodes_label}</div><div class="stat-note">в текущем кейсе</div></div>
           <div class="stat-tile"><div class="stat-name">Наблюдаемые связи</div><div class="stat-value">{edges_label}</div><div class="stat-note">направленных переводов</div></div>
+          <div class="stat-tile"><div class="stat-name">Transactions</div><div class="stat-value">{transaction_label}</div><div class="stat-note">From edge transaction counts</div></div>
+          <div class="stat-tile"><div class="stat-name">Observed volume</div><div class="stat-value">{amount_label}</div><div class="stat-note">Total amount in the loaded extract</div></div>
           <div class="stat-tile"><div class="stat-name">Очередь проверки</div><div class="stat-value">{top_label}</div><div class="stat-note">приоритетных узлов</div></div>
           <div class="stat-tile"><div class="stat-name">Режим решения</div><div class="stat-value">{result_label}</div><div class="stat-note">{result_note}</div></div>
         </div>
