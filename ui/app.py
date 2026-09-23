@@ -107,12 +107,47 @@ def prepare_nodes(nodes: pd.DataFrame) -> pd.DataFrame:
         # Arrow-backed tables and dropdowns also cross the browser boundary.
         prepared["gid"] = prepared["gid"].map(normalise_id).astype("string")
         prepared["_gid_key"] = prepared["gid"]
-    if "is_seed" in prepared:
-        prepared["is_seed"] = prepared["is_seed"].map(lambda value: str(value).strip().lower() in {"true", "1", "1.0"})
+    flags = {"true": True, "1": True, "1.0": True, "false": False, "0": False, "0.0": False}
+    for column in ("is_seed", "truncated_by_depth"):
+        if column in prepared:
+            prepared[column] = prepared[column].map(lambda value: flags.get(str(value).strip().lower(), pd.NA)).astype("boolean")
     for column in ("role_score", "priority_score"):
         if column in prepared:
             prepared[column] = pd.to_numeric(prepared[column], errors="coerce")
     return prepared
+
+
+def attach_collection_metadata(nodes: pd.DataFrame, source_nodes: pd.DataFrame,
+                               directory: Path) -> tuple[pd.DataFrame, list[str]]:
+    """Join upstream collection flags only; never import scores from metrics."""
+    issues = []
+    metadata = pd.DataFrame()
+    metric_path = directory / "node_metrics.csv"
+    if metric_path.exists():
+        metrics, error = read_result("node_metrics.csv", directory)
+        if error or "gid" not in metrics:
+            issues.append(error or "node_metrics.csv: отсутствует gid; метаданные недоступны.")
+        else:
+            keys = metrics.gid.map(normalise_id)
+            if keys.eq("").any() or keys.duplicated().any():
+                issues.append("node_metrics.csv: пустые или дублирующиеся gid; метаданные не подключены.")
+            else:
+                columns = [c for c in ("gid", "depth", "is_seed", "truncated_by_depth") if c in metrics]
+                metadata = prepare_nodes(metrics[columns]).set_index("_gid_key")
+                if set(keys) != set(nodes._gid_key):
+                    issues.append("node_metrics.csv: состав GID отличается от nodes_roles.csv; используются только совпавшие GID.")
+    if not source_nodes.empty and "gid" in source_nodes:
+        source = prepare_nodes(source_nodes)
+        if source._gid_key.duplicated().any() or source._gid_key.eq("").any():
+            issues.append("nodes.parquet: пустые или дублирующиеся gid; метаданные не подключены.")
+        else:
+            fallback = source.set_index("_gid_key")[[c for c in ("depth", "is_seed") if c in source]]
+            metadata = fallback if metadata.empty else metadata.combine_first(fallback)
+    result = nodes.copy()
+    for column in ("depth", "is_seed", "truncated_by_depth"):
+        if column in metadata and column not in result:
+            result[column] = result._gid_key.map(metadata[column])
+    return result, issues
 
 
 def find_selected_client(nodes: pd.DataFrame, requested_gid: str, fallback_gid: object) -> pd.Series:
@@ -153,6 +188,7 @@ def main() -> None:
     validation_issues = validate_nodes(pipeline_nodes) if not pipeline_nodes.empty else []
     source_nodes, source_error = (pd.DataFrame(), None) if demo_mode else read_source("nodes")
 
+    metadata_issues = []
     if raw_mode:
         if source_nodes.empty:
             render_pipeline_waiting_state(source_error or "Исходная таблица клиентов пуста.")
@@ -172,11 +208,8 @@ def main() -> None:
         return
     else:
         nodes, clusters, top_nodes = pipeline_nodes, pipeline_clusters, pipeline_top
-        # Attach observed collection metadata, without overriding pipeline values.
-        if not demo_mode and not source_nodes.empty:
-            metadata = prepare_nodes(source_nodes)
-            missing_meta = [c for c in ("depth", "is_seed") if c not in nodes and c in metadata]
-            nodes = nodes.merge(metadata[["_gid_key", *missing_meta]], on="_gid_key", how="left", validate="one_to_one")
+        if not demo_mode:
+            nodes, metadata_issues = attach_collection_metadata(nodes, source_nodes, active_dir)
         data_message = "Синтетические mock CSV: роли, приоритеты и связи служат только для демонстрации UI. Это не выводы по реальным клиентам." if demo_mode else ""
 
     optional_issues = [
@@ -272,6 +305,8 @@ def main() -> None:
             st.caption(f"Возврат к {st.session_state.traceflow_history[-1]}")
 
     render_hero(demo_mode, len(nodes), len(edges), len(top_nodes), raw_mode=raw_mode)
+    for issue in metadata_issues:
+        st.warning(issue)
     if demo_mode:
         render_demo_banner(data_message)
     elif raw_mode:

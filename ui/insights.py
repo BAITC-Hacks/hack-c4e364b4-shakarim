@@ -23,7 +23,8 @@ def render_observed(client: pd.Series, edges: pd.DataFrame) -> None:
         col.metric(label, format_money(table.sum_kzt.sum()) if "sum_kzt" in table else "—")
         col.caption(f"Контрагентов: {table[peer].nunique()}")
     depth = client.get("depth")
-    if pd.notna(depth) and str(depth) in {"4", "4.0"} and outgoing.empty:
+    boundary_flag = str(client.get("truncated_by_depth", "")).lower() in {"true", "1", "1.0"}
+    if boundary_flag or (pd.notna(depth) and str(depth) in {"4", "4.0"} and outgoing.empty):
         st.warning("Граница 4-го колена: дальнейшие переводы не наблюдаются. Это не доказательство того, что деньги остались у клиента.")
     if str(client.get("is_seed", "")).lower() in {"true", "1"}:
         st.info("Исходный клиент (seed). Его входящий поток неполон; отношение отправленного к полученному не отражает полный баланс.")

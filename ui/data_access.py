@@ -7,7 +7,7 @@ import streamlit as st
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS_DIR = Path(os.environ.get("TRACEFLOW_RESULTS_DIR", str(ROOT / "output")))
-DATA_DIR = Path(os.environ.get("TRACEFLOW_DATA_DIR", str(ROOT / "data (1)" / "data")))
+DATA_DIR = Path(os.environ.get("TRACEFLOW_DATA_DIR", str(ROOT / "data")))
 
 
 @st.cache_data(ttl=20, show_spinner=False)

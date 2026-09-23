@@ -52,11 +52,11 @@ def role_label(role: Any) -> str:
     return ROLE_LABELS.get(key, str(role).strip() or "Не определена")
 
 
-def format_score(value: Any) -> str:
+def format_score(value: Any, decimals: int = 2) -> str:
     if value is None or pd.isna(value):
         return "—"
     try:
-        return f"{float(value):.2f}"
+        return f"{float(value):.{decimals}f}"
     except (TypeError, ValueError):
         return escape(str(value))
 
@@ -102,7 +102,7 @@ def investigation_brief(client: pd.Series, priority_reason: object, edges: pd.Da
              f"Роль (гипотеза): {role_label(client.get('role'))}",
              f"Оценка роли: {format_score(client.get('role_score'))}",
              f"Кластер: {normalise_id(client.get('cluster_id'))}",
-             f"Приоритет: {format_score(client.get('priority_score'))} / {priority_maximum}",
+             f"Приоритет: {format_score(client.get('priority_score'), 3 if priority_maximum == 1 else 2)} / {priority_maximum}",
              "", "## Обоснование роли из CSV", str(client.get("evidence", "Не передано")),
              "", "## Причина приоритета из CSV",
              str(priority_reason) if pd.notna(priority_reason) and str(priority_reason).strip() else "Не передана.",
@@ -291,7 +291,7 @@ def render_client_card(client: pd.Series, priority_reason: object = None, priori
           <div class="panel-body">
             <div class="metric-grid">
               <div class="metric"><div class="metric-label">Оценка роли</div><div class="metric-value">{format_score(client.get("role_score"))}</div></div>
-              <div class="metric"><div class="metric-label">Приоритет / {priority_maximum}</div><div class="metric-value">{format_score(client.get("priority_score"))}</div></div>
+              <div class="metric"><div class="metric-label">Приоритет / {priority_maximum}</div><div class="metric-value">{format_score(client.get("priority_score"), 3 if priority_maximum == 1 else 2)}</div></div>
               <div class="metric"><div class="metric-label">Кластер</div><div class="metric-value">#{escape(normalise_id(client.get("cluster_id")) or "—")}</div></div>
             </div>
             <div class="evidence"><div class="evidence-label">Обоснование роли</div>{escape(evidence_text)}</div>
@@ -361,7 +361,7 @@ def render_top_nodes(top_nodes: pd.DataFrame, limit: int = 20, priority_maximum:
         gid = escape(normalise_id(row.get("gid")) or "—")
         why = escape(str(row.get("why", row.get("evidence", "—"))))
         rows.append(
-            f"<tr><td class='rank'>#{rank}</td><td><b>{gid}</b></td><td>{role_badge(row.get('role'))}</td><td><b>{format_score(row.get('priority_score'))}</b></td><td class='quiet'>{why}</td></tr>"
+            f"<tr><td class='rank'>#{rank}</td><td><b>{gid}</b></td><td>{role_badge(row.get('role'))}</td><td><b>{format_score(row.get('priority_score'), 3 if priority_maximum == 1 else 2)}</b></td><td class='quiet'>{why}</td></tr>"
         )
     body = "".join(rows) or "<tr><td colspan='5' class='quiet'>Нет узлов в очереди проверки.</td></tr>"
     st.markdown(

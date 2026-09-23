@@ -34,9 +34,13 @@ def load_edges(candidates: tuple[Path, ...]) -> tuple[pd.DataFrame, Path | None]
                 loaded = pd.read_csv(
                     path,
                     encoding="utf-8-sig",
-                    usecols=lambda column: column in {"src", "dst", "sum_kzt", "n_tx"},
-                    dtype={"src": "string", "dst": "string"},
+                    usecols=lambda column: column in {"src", "dst", "source", "target", "sum_kzt", "amount", "n_tx"},
+                    dtype={"src": "string", "dst": "string", "source": "string", "target": "string"},
                 )
+            # Analytics CLI also accepts source,target,amount exports.
+            loaded = loaded.rename(columns={alias: canonical for alias, canonical in
+                (("source", "src"), ("target", "dst"), ("amount", "sum_kzt"))
+                if alias in loaded and canonical not in loaded})
             if {"src", "dst"}.issubset(loaded.columns):
                 loaded = loaded.copy()
                 # Never send int64 IDs from parquet to JavaScript numeric cells.

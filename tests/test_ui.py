@@ -50,8 +50,22 @@ class ContractTests(unittest.TestCase):
         self.assertIn("GID: " + gid, brief)
         self.assertIn("Всего направленных связей: 12", brief)
         self.assertIn(gid + " → 11", brief)
-        for text in ("0.42 / 1", "Кластер: 07", "Оригинальная гипотеза команды.", "Оригинальный приоритет.", "SEED", "DEPTH=4", "Демонстрационный кейс"):
+        for text in ("0.420 / 1", "Кластер: 07", "Оригинальная гипотеза команды.", "Оригинальный приоритет.", "SEED", "DEPTH=4", "Демонстрационный кейс"):
             self.assertIn(text, brief)
+
+    def test_analytics_edge_aliases_preserve_adjacent_large_string_ids(self):
+        first, second = "9223372036854775806", "9223372036854775807"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "edges.csv"
+            path.write_text(f"source,target,amount\n{first},{second},5000\n{second},{first},6000\n", encoding="utf-8-sig")
+            edges, loaded_path = load_edges((path,))
+            self.assertEqual(loaded_path, path)
+            self.assertNotIn("load_error", edges.attrs)
+            self.assertEqual(edges.src.tolist(), [first, second])
+            self.assertEqual(edges.dst.tolist(), [second, first])
+            self.assertEqual(edges.sum_kzt.tolist(), [5000, 6000])
+            self.assertEqual(edges._src_key.tolist(), [first, second])
+            self.assertEqual(edges._dst_key.tolist(), [second, first])
 
     def test_adjacent_large_int64_ids_remain_distinct_text_in_parquet_loader(self):
         ids = [9007199254740992, 9007199254740993]
@@ -180,6 +194,65 @@ class AppTests(unittest.TestCase):
         self.assertIn("#40", tables)
         self.assertIn("#50", tables)
 
+    def test_metrics_csv_metadata_keeps_seed_and_depth_caveats_without_raw_parquet(self):
+        nodes, _, _, _ = self.write_results()
+        # Analytics exports conclusions only; collection metadata comes from DEV 1.
+        nodes = nodes[list(sorted(app.NODE_COLUMNS))]
+        nodes.to_csv(self.output / "nodes_roles.csv", index=False)
+        metrics = pd.DataFrame({"gid": nodes.gid, "depth": 1, "is_seed": False,
+                                "truncated_by_depth": False, "priority_score": .001,
+                                "role": "terminal"})
+        metrics.loc[metrics.gid.eq("901245"), ["depth", "is_seed"]] = [0, True]
+        metrics.loc[metrics.gid.eq("908001"), ["depth", "truncated_by_depth"]] = [4, True]
+        metrics.to_csv(self.output / "node_metrics.csv", index=False)
+        before = {path.name: path.read_bytes() for path in self.output.glob("*.csv")}
+        with patch("app.read_source", return_value=(pd.DataFrame(), "Исходный parquet не передан.")):
+            at = self.launch()
+            self.assertTrue(any("входящий поток неполон" in item.value for item in at.info))
+            card = next(m.value for m in at.markdown if 'class="subject-id"' in m.value)
+            self.assertIn("Координатор", card)
+            self.assertIn(nodes.loc[nodes.gid.eq("901245"), "evidence"].iloc[0], card)
+            self.assertIn("0.980", card)
+            at.text_input[0].set_value("908001")
+            next(b for b in at.button if b.label == "Открыть профиль").click().run()
+            self.assertFalse(at.exception)
+            self.assertEqual(at.session_state.traceflow_active_gid, "908001")
+            self.assertTrue(any("Граница 4-го колена" in item.value for item in at.warning))
+            self.assertFalse(any("входящий поток неполон" in item.value for item in at.info))
+        self.assertEqual(before, {path.name: path.read_bytes() for path in self.output.glob("*.csv")})
+
+    def test_duplicate_metrics_ids_warn_without_breaking_analytics_profile(self):
+        self.write_results()
+        pd.DataFrame({"gid": ["901245", "901245"], "depth": [0, 4],
+                      "is_seed": [True, False], "truncated_by_depth": [False, True]}).to_csv(
+            self.output / "node_metrics.csv", index=False)
+        with patch("app.read_source", return_value=(pd.DataFrame(), "Исходный parquet не передан.")):
+            at = self.launch()
+        warnings = " ".join(item.value for item in at.warning)
+        self.assertIn("node_metrics.csv", warnings)
+        self.assertRegex(warnings.lower(), "дубл|повтор")
+        self.assertEqual(at.session_state.traceflow_active_gid, "901245")
+        self.assertTrue(any('class="subject-id"' in item.value for item in at.markdown))
+
+    def test_normalized_priority_keeps_third_decimal_in_card_top_and_brief(self):
+        nodes, _, top, edges = self.write_results()
+        nodes.loc[nodes.gid.eq("901245"), "priority_score"] = .965
+        top.loc[top.gid.eq("901245"), "priority_score"] = .965
+        top.loc[top.gid.eq("901245"), "why"] = "Исходное объяснение приоритета от аналитики."
+        nodes.to_csv(self.output / "nodes_roles.csv", index=False)
+        top.to_csv(self.output / "top_nodes.csv", index=False)
+        at = self.launch()
+        card = next(m.value for m in at.markdown if 'class="subject-id"' in m.value)
+        self.assertIn("Приоритет / 1", card)
+        self.assertIn("0.965", card)
+        self.assertIn("Исходное объяснение приоритета от аналитики.", card)
+        tables = [m.value for m in at.markdown if '<table class="trace-table"' in m.value]
+        self.assertTrue(tables)
+        self.assertTrue(all("0.965" in table for table in tables))
+        brief = investigation_brief(nodes.loc[nodes.gid.eq("901245")].iloc[0],
+                                    "Исходное объяснение приоритета от аналитики.", edges, "CSV команды")
+        self.assertIn("Приоритет: 0.965 / 1", brief)
+
     def test_broken_edges_show_unavailable_instead_of_isolated_node(self):
         self.write_results()
         (self.output / "edges.csv").write_text("wrong,columns\n1,2\n", encoding="utf-8")
@@ -210,8 +283,8 @@ class AppTests(unittest.TestCase):
         next(b for b in at.button if b.label == "Открыть профиль").click()
         at.run()
         self.assertTrue(any("Клиент не найден" in w.value for w in at.warning))
-        nodes = pd.read_parquet(ROOT / "data (1)/data/nodes.parquet")
-        edges = pd.read_parquet(ROOT / "data (1)/data/edges.parquet")
+        nodes = pd.read_parquet(ROOT / "data/nodes.parquet")
+        edges = pd.read_parquet(ROOT / "data/edges.parquet")
         orphan = next(iter(set(nodes.gid) - set(edges.src) - set(edges.dst)))
         at.text_input[0].set_value(str(orphan))
         next(b for b in at.button if b.label == "Открыть профиль").click()
@@ -222,8 +295,8 @@ class AppTests(unittest.TestCase):
 
     def test_search_real_seed_and_browser_tables_use_string_ids(self):
         at = self.choose_source(self.launch(), "Исходные данные")
-        source = pd.read_parquet(ROOT / "data (1)/data/nodes.parquet")
-        edges = pd.read_parquet(ROOT / "data (1)/data/edges.parquet")
+        source = pd.read_parquet(ROOT / "data/nodes.parquet")
+        edges = pd.read_parquet(ROOT / "data/edges.parquet")
         gid = str(source.loc[source.is_seed & source.gid.isin(edges.src), "gid"].iloc[0])
         at.text_input[0].set_value(gid)
         next(b for b in at.button if b.label == "Открыть профиль").click()
@@ -241,8 +314,8 @@ class AppTests(unittest.TestCase):
 
     def test_depth_four_caveat_is_visible_for_real_boundary_node(self):
         at = self.choose_source(self.launch(), "Исходные данные")
-        source = pd.read_parquet(ROOT / "data (1)/data/nodes.parquet")
-        edges = pd.read_parquet(ROOT / "data (1)/data/edges.parquet")
+        source = pd.read_parquet(ROOT / "data/nodes.parquet")
+        edges = pd.read_parquet(ROOT / "data/edges.parquet")
         gid = str(source.loc[(source.depth == 4) & ~source.gid.isin(edges.src), "gid"].iloc[0])
         at.text_input[0].set_value(gid)
         next(b for b in at.button if b.label == "Открыть профиль").click()
