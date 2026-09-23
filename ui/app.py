@@ -6,7 +6,13 @@ Run from the repository root:
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+UI_DIR = Path(__file__).resolve().parent
+if str(UI_DIR) not in sys.path:
+    sys.path.insert(0, str(UI_DIR))
 
 import pandas as pd
 import streamlit as st
@@ -28,7 +34,6 @@ from data_access import DATA_DIR, RESULTS_DIR, read_source, raw_profiles
 from insights import render_observed, render_connections_table, render_timeline, render_catalog
 
 
-ROOT = Path(__file__).resolve().parents[1]
 NODE_COLUMNS = {"gid", "role", "role_score", "priority_score", "cluster_id", "evidence"}
 TOP_NODE_COLUMNS = {"rank", "gid", "role", "priority_score", "why"}
 CLUSTER_COLUMNS = {"cluster_id", "n_nodes", "n_seed", "sum_kzt_internal", "top_gids", "hypothesis"}
@@ -77,8 +82,6 @@ def validate_nodes(nodes: pd.DataFrame) -> list[str]:
         values = pd.to_numeric(nodes[column], errors="coerce")
         if not values.between(0, maximum).all():
             issues.append(f"{column}: требуются числа от 0 до {maximum}")
-    if nodes.evidence.astype(str).str.len().gt(200).any():
-        issues.append("evidence: превышен лимит 200 символов")
     return issues
 
 
@@ -257,6 +260,8 @@ def main() -> None:
         st.warning("Часть готовых выгрузок пока недоступна или не соответствует контракту: интерфейс показывает только доступные результаты.")
     if priority_maximum == 100:
         st.warning("Пайплайн передал приоритет в шкале 0–100. UI показывает его без пересчёта. Для итоговой сдачи по ТЗ аналитический экспорт должен использовать шкалу 0–1.")
+    if not raw_mode and nodes.evidence.astype(str).str.len().gt(200).any():
+        st.warning("В CSV есть evidence длиннее 200 символов. UI показывает полный текст без изменений; перед сдачей команда аналитики должна сократить объяснения до лимита ТЗ.")
     if not demo_mode and not raw_mode and len(top_nodes) < 20:
         st.warning(f"В очереди {len(top_nodes)} узлов. Для сдачи по ТЗ требуется не менее 20.")
     if not demo_mode and not raw_mode and not source_nodes.empty:

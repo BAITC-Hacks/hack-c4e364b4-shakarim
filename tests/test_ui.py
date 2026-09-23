@@ -173,6 +173,17 @@ class AppTests(unittest.TestCase):
         self.assertIn("98.00", card)
         self.assertTrue(any("без пересчёта" in item.value for item in at.warning))
 
+    def test_long_evidence_warns_without_blocking_search_or_truncating_text(self):
+        nodes, _, _, _ = self.write_results()
+        full_text = "Обоснование аналитики: " + "наблюдение " * 20
+        nodes.loc[nodes.gid == "901245", "evidence"] = full_text
+        nodes.to_csv(self.output / "nodes_roles.csv", index=False)
+        at = self.launch()
+        self.assertTrue(at.text_input)
+        card = next(m.value for m in at.markdown if 'class="subject-id"' in m.value)
+        self.assertIn(full_text, card)
+        self.assertTrue(any("длиннее 200" in item.value for item in at.warning))
+
     def test_design_preview_is_separate_and_can_close(self):
         at = self.launch()
         self.assertTrue(any("ДЕМО-РЕЖИМ" in item.value for item in at.markdown))

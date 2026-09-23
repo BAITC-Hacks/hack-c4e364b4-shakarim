@@ -1,176 +1,136 @@
 #!/usr/bin/env python3
-"""
-Стартовый код кейса «Граф денег» — HackAlem AI.
-
-Что он делает:
-  1. грузит три parquet-файла и проверяет их консистентность;
-  2. собирает направленный взвешенный граф;
-  3. считает БАЗОВЫЕ метрики узлов (степени, обороты, PageRank);
-  4. пишет три выгрузки в требуемой ТЗ схеме — с ПУСТЫМИ ролями.
-
-Чего он НЕ делает — это ваша работа:
-  * не присваивает роли,
-  * не кластеризует,
-  * не ранжирует узлы,
-  * не рисует граф.
-
-Запуск:
-    python starter.py --data ../data --out ./out
-"""
+"""Build node metrics, behavioral roles, communities, and review priorities."""
+from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
+import networkx as nx
 import numpy as np
 import pandas as pd
-import networkx as nx
 
 ROLES = ["consolidator", "transit", "distributor", "terminal", "coordinator", "peripheral"]
 
 
-# ---------------------------------------------------------------- загрузка
-
 def load(data_dir: Path):
-    edges = pd.read_parquet(data_dir / "edges.parquet")
-    nodes = pd.read_parquet(data_dir / "nodes.parquet")
-    tx = pd.read_parquet(data_dir / "transactions.parquet")
-    tx["date"] = pd.to_datetime(tx["date"])
-    return edges, nodes, tx
+    return tuple(pd.read_parquet(data_dir / f) for f in ("edges.parquet", "nodes.parquet", "transactions.parquet"))
 
 
-def sanity_check(edges, nodes, tx):
-    """Проверки, которые стоит пройти до того, как строить модель."""
-    print("=" * 64)
-    print("ПРОВЕРКА ДАННЫХ")
-    print("=" * 64)
-    print(f"  узлов в nodes.parquet : {len(nodes):>6}")
-    print(f"  рёбер                 : {len(edges):>6}")
-    print(f"  транзакций            : {len(tx):>6}")
-    print(f"  seed-клиентов         : {int(nodes.is_seed.sum()):>6}")
-    print(f"  оборот, KZT           : {edges.sum_kzt.sum():>14,.0f}")
-    print(f"  период                : {tx.date.min().date()} — {tx.date.max().date()}")
-
-    # транзакции должны складываться в рёбра
-    agg = tx.groupby(["src", "dst"]).agg(s=("sum_kzt", "sum"), c=("sum_kzt", "size")).reset_index()
-    m = edges.merge(agg, on=["src", "dst"], how="outer", indicator=True)
-    assert (m._merge == "both").all(), "edges и transactions не сходятся по парам"
-    print("  edges == transactions : OK")
-
-    # узлы без единого ребра
-    in_edges = set(edges.src) | set(edges.dst)
-    orphans = set(nodes.gid) - in_edges
-    print(f"\n  ВНИМАНИЕ: {len(orphans)} узлов нет ни в одном ребре "
-          f"(из них seed: {len(orphans & set(nodes[nodes.is_seed].gid))})")
-    print("  → они всё равно должны попасть в nodes_roles.csv")
-    print("=" * 64, "\n")
-    return orphans
-
-
-# ---------------------------------------------------------------- граф
-
-def build_graph(edges) -> nx.DiGraph:
-    """Направленный граф. sum_kzt — вес ребра, n_tx — количество переводов."""
+def build_graph(edges: pd.DataFrame, nodes: pd.DataFrame) -> nx.DiGraph:
+    """Directed, weighted graph. Keep isolated nodes from nodes.parquet."""
     G = nx.DiGraph()
+    G.add_nodes_from(nodes.gid.tolist())
     for r in edges.itertuples(index=False):
         G.add_edge(r.src, r.dst, sum_kzt=float(r.sum_kzt), n_tx=int(r.n_tx), depth=int(r.depth))
     return G
 
 
-def basic_features(G: nx.DiGraph, nodes: pd.DataFrame) -> pd.DataFrame:
-    """Базовые метрики. Это старт, а не финиш — добавляйте свои."""
-    in_deg = dict(G.in_degree())
-    out_deg = dict(G.out_degree())
-    in_kzt = dict(G.in_degree(weight="sum_kzt"))
-    out_kzt = dict(G.out_degree(weight="sum_kzt"))
-    in_tx = dict(G.in_degree(weight="n_tx"))
-    out_tx = dict(G.out_degree(weight="n_tx"))
-    pr = nx.pagerank(G, weight="sum_kzt")
-
-    df = nodes[["gid", "depth", "is_seed"]].copy()
-    df["in_deg"] = df.gid.map(in_deg).fillna(0).astype(int)
-    df["out_deg"] = df.gid.map(out_deg).fillna(0).astype(int)
-    df["in_kzt"] = df.gid.map(in_kzt).fillna(0.0)
-    df["out_kzt"] = df.gid.map(out_kzt).fillna(0.0)
-    df["in_tx"] = df.gid.map(in_tx).fillna(0).astype(int)
-    df["out_tx"] = df.gid.map(out_tx).fillna(0).astype(int)
-    df["pagerank"] = df.gid.map(pr).fillna(0.0)
-
-    # доля полученного, которая ушла дальше. Около 1.0 — деньги не задерживаются.
-    df["pass_through"] = np.where(df.in_kzt > 0, df.out_kzt / df.in_kzt.replace(0, np.nan), np.nan)
-
-    # ЛОВУШКА КЕЙСА: узел на 4-м колене без исходящих может быть не «стоком»,
-    # а просто местом, где закончился обход. Разберитесь с этим.
-    df["truncated_by_depth"] = (df.depth == 4) & (df.out_deg == 0)
-    return df
+def basic_features(G: nx.DiGraph, nodes: pd.DataFrame, edges: pd.DataFrame) -> pd.DataFrame:
+    """One row per gid; `truncated_by_depth` flags censored leaves explicitly."""
+    node = nodes[["gid", "depth", "is_seed"]].drop_duplicates("gid").copy()
+    node["is_seed"] = node.is_seed.astype(bool)
+    # Edge table is already aggregated by ordered pair; distinct pair count is degree.
+    f = edges.groupby("src").agg(out_amount=("sum_kzt", "sum"), out_tx_count=("n_tx", "sum"), unique_receivers=("dst", "nunique"))
+    f = f.join(edges.groupby("dst").agg(in_amount=("sum_kzt", "sum"), in_tx_count=("n_tx", "sum"), unique_senders=("src", "nunique")), how="outer")
+    deg = pd.DataFrame({"gid": list(G), "in_degree": [G.in_degree(x) for x in G], "out_degree": [G.out_degree(x) for x in G]})
+    f = node.merge(deg, on="gid", how="left").join(f, on="gid").fillna(0)
+    for c in ("in_degree", "out_degree", "in_tx_count", "out_tx_count", "unique_senders", "unique_receivers"):
+        f[c] = f[c].astype(int)
+    # At depth four, absent outflow is censored by extraction, not evidence of a true sink.
+    f["truncated_by_depth"] = (f.depth >= 4) & (f.out_degree == 0)
+    f["pass_through"] = np.divide(f.out_amount, f.in_amount, out=np.full(len(f), np.nan), where=f.in_amount.to_numpy() > 0)
+    # Suppress misleading ratios on seeds: their incoming history lies outside the extract.
+    f.loc[f.is_seed, "pass_through"] = np.nan
+    pr = nx.pagerank(G, weight="sum_kzt") if G.number_of_nodes() else {}
+    f["pagerank"] = f.gid.map(pr).fillna(0.0)
+    # Weighted betweenness uses inverse transfer volume as path cost.
+    for u, v, d in G.edges(data=True):
+        d["distance"] = 1.0 / max(d.get("sum_kzt", 0.0), 1e-12)
+    btw = nx.betweenness_centrality(G, weight="distance", normalized=True) if len(G) < 10000 else nx.betweenness_centrality(G, k=min(500, len(G)), weight="distance", seed=42)
+    f["betweenness"] = f.gid.map(btw).fillna(0.0)
+    return f
 
 
-# ---------------------------------------------------------------- выгрузки
+def _norm(s: pd.Series) -> pd.Series:
+    x = np.log1p(s.clip(lower=0))
+    lo, hi = x.quantile(.05), x.quantile(.95)
+    return ((x - lo) / (hi - lo)).clip(0, 1) if hi > lo else pd.Series(0.0, index=s.index)
 
-def write_outputs(df: pd.DataFrame, out_dir: Path):
+
+def analyze(df: pd.DataFrame, G: nx.DiGraph):
+    """Assign explainable heuristic roles/scores and weighted Louvain communities."""
+    U = nx.Graph()
+    U.add_nodes_from(G.nodes)
+    for u, v, d in G.edges(data=True):
+        if U.has_edge(u, v): U[u][v]["weight"] += d.get("sum_kzt", 0)
+        else: U.add_edge(u, v, weight=d.get("sum_kzt", 0))
+    communities = nx.community.louvain_communities(U, weight="weight", seed=42) if U.number_of_edges() else [{n} for n in U]
+    cmap = {gid: i for i, comm in enumerate(sorted(communities, key=lambda c: min(map(str, c)))) for gid in comm}
+    df["cluster_id"] = df.gid.map(cmap).fillna(-1).astype(int)
+    # Robust within-dataset scaling; seeds have incomplete inbound amounts, so don't score that signal for them.
+    for name in ("in_degree", "out_degree", "in_amount", "out_amount", "pagerank", "betweenness", "unique_senders", "unique_receivers"):
+        df["_" + name] = _norm(df[name])
+    ratio = df.pass_through
+    roles, role_scores, evidence, priorities = [], [], [], []
+    for _, r in df.iterrows():
+        inbound = 0 if r.is_seed else r.in_degree
+        if r.truncated_by_depth:
+            role = "peripheral" if r.in_degree == 0 else "transit"
+        elif inbound >= max(2, int(df.in_degree.quantile(.75))) and r.out_degree <= max(1, int(df.out_degree.median())):
+            role = "consolidator"
+        elif r.out_degree >= max(3, int(df.out_degree.quantile(.75))) and r.out_degree > r.in_degree:
+            role = "distributor"
+        elif r.in_degree > 0 and r.out_degree > 0 and pd.notna(r.pass_through) and .8 <= r.pass_through <= 1.2:
+            role = "transit"
+        elif r.in_degree > 0 and r.out_degree == 0:
+            role = "terminal"
+        elif r.betweenness >= df.betweenness.quantile(.9) and (r.in_degree > 0 and r.out_degree > 0):
+            role = "coordinator"
+        else:
+            role = "peripheral"
+        roles.append(role)
+        norm = lambda n: float(r["_" + n])
+        rs = {"consolidator": .55*norm("unique_senders")+.25*norm("in_amount")+.2*norm("in_degree"),
+              "distributor": .4*norm("unique_receivers")+.35*norm("out_amount")+.25*norm("out_degree"),
+              "transit": 1-min(1, abs(np.log(max(r.pass_through, 1e-9))) / 2) if pd.notna(r.pass_through) else .35,
+              "coordinator": .65*norm("betweenness")+.35*norm("pagerank"),
+              "terminal": min(1, .35+.25*norm("in_amount")+.2*norm("in_degree")), "peripheral": .35}
+        role_scores.append(round(float(np.clip(rs[role], 0, 1)), 4))
+        why = f"{r.in_degree} входящих связей от {r.unique_senders} отправителей; {r.out_degree} исходящих связей к {r.unique_receivers} получателям; вход {r.in_amount:,.0f} KZT, выход {r.out_amount:,.0f} KZT"
+        if r.truncated_by_depth: why += ". Depth=4: отсутствие исходящих связей может быть следствием границы выгрузки"
+        elif r.is_seed: why += ". Seed: входящие суммы неполны, pass-through не интерпретируется"
+        evidence.append(why[:200])
+    df["role"] = roles
+    df["role_score"] = role_scores
+    df["evidence"] = evidence
+    df["priority_score"] = (0.25*df["_pagerank"] + 0.22*df["_betweenness"] + 0.18*df["_in_amount"] + 0.18*df["_out_amount"] + 0.17*df["_in_degree"].combine(df["_out_degree"], max)).clip(0, 1).round(4)
+    return df, U
+
+
+def write_outputs(df: pd.DataFrame, U: nx.Graph, tx: pd.DataFrame, out_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    # 1. nodes_roles.csv — схема из ТЗ, роли не заполнены
-    roles = df[["gid"]].copy()
-    roles["role"] = ""            # TODO: одна из ROLES
-    roles["role_score"] = 0.0     # TODO: 0..1
-    roles["cluster_id"] = -1      # TODO: номер кластера
-    roles["priority_score"] = 0.0 # TODO: 0..1
-    roles["evidence"] = ""        # TODO: почему — с числами, до 200 символов
-    roles = roles.merge(
-        df[["gid", "in_deg", "out_deg", "in_kzt", "out_kzt", "pagerank",
-            "pass_through", "depth", "is_seed", "truncated_by_depth"]],
-        on="gid", how="left")
-    roles.to_csv(out_dir / "nodes_roles.csv", index=False)
-
-    # 2. clusters.csv — пустой каркас
-    pd.DataFrame(columns=["cluster_id", "n_nodes", "n_seed",
-                          "sum_kzt_internal", "top_gids", "hypothesis"]) \
-        .to_csv(out_dir / "clusters.csv", index=False)
-
-    # 3. top_nodes.csv — пустой каркас, нужно ≥20 строк
-    pd.DataFrame(columns=["rank", "gid", "role", "priority_score", "why"]) \
-        .to_csv(out_dir / "top_nodes.csv", index=False)
-
-    print(f"Выгрузки записаны в {out_dir}/  (роли пока пустые — это ваша задача)")
-
-
-# ---------------------------------------------------------------- подсказки
-
-def hints(G: nx.DiGraph, df: pd.DataFrame):
-    """Куда смотреть дальше. Ответов здесь нет — только направления."""
-    print("\nС ЧЕГО НАЧАТЬ")
-    print("-" * 64)
-    print(f"  узлов, получающих от 3+ разных плательщиков : {(df.in_deg >= 3).sum()}")
-    print(f"  узлов, рассылающих на 10+ получателей       : {(df.out_deg >= 10).sum()}")
-    print(f"  узлов и с входом, и с выходом               : {((df.in_deg > 0) & (df.out_deg > 0)).sum()}")
-    print(f"  узлов, обрезанных 4-м коленом               : {df.truncated_by_depth.sum()}  <- разберитесь")
-    print(f"  слабосвязных компонент                      : {nx.number_weakly_connected_components(G)}")
-    print("""
-  Вопросы, на которые стоит ответить метриками:
-    * чем «деньги пришли и остались» отличается от «пришли и ушли дальше»?
-    * что важнее для роли — количество плательщиков или сумма?
-    * узел собирает средства от нескольких SEED — это случайность или структура?
-    * если убрать узел, сеть распадётся или переживёт?
-
-  Полезное в networkx: pagerank, hits, betweenness_centrality,
-  community.louvain_communities, simple_cycles, all_simple_paths.
-  Не забудьте: граф НАПРАВЛЕННЫЙ и ВЗВЕШЕННЫЙ.
-""")
+    df.to_csv(out_dir / "node_metrics.csv", index=False)
+    cols = ["gid", "role", "role_score", "cluster_id", "priority_score", "evidence", "in_deg", "out_deg", "in_kzt", "out_kzt", "pagerank", "pass_through", "depth", "is_seed", "truncated_by_depth"]
+    roles = df.rename(columns={"in_degree":"in_deg", "out_degree":"out_deg", "in_amount":"in_kzt", "out_amount":"out_kzt"})
+    roles[cols].to_csv(out_dir / "nodes_roles.csv", index=False)
+    crows=[]
+    for cid, group in df.groupby("cluster_id"):
+        gids=set(group.gid); internal=sum(d.get("sum_kzt",0) for u,v,d in U.edges(data=True) if u in gids and v in gids)
+        tops=group.nlargest(5,"priority_score").gid.astype(str).tolist()
+        dominant=group.role.value_counts().idxmax()
+        crows.append(dict(cluster_id=cid,n_nodes=len(group),n_seed=int(group.is_seed.sum()),sum_kzt_internal=internal,top_gids=";".join(tops),hypothesis=f"Преобладает роль {dominant}; гипотеза требует проверки по связям"))
+    pd.DataFrame(crows, columns=["cluster_id","n_nodes","n_seed","sum_kzt_internal","top_gids","hypothesis"]).to_csv(out_dir/"clusters.csv",index=False)
+    top=df.nlargest(min(100,len(df)),"priority_score").copy()
+    top.insert(0,"rank",range(1,len(top)+1)); top.rename(columns={"gid":"gid"},inplace=True)
+    top[["rank","gid","role","priority_score","evidence"]].rename(columns={"evidence":"why"}).to_csv(out_dir/"top_nodes.csv",index=False)
+    print(f"Nodes: {len(df):,}; edges: {U.number_of_edges():,}; transactions: {int(tx.shape[0]):,}; clusters: {df.cluster_id.nunique():,}")
+    print(f"Wrote node_metrics.csv, nodes_roles.csv, clusters.csv, top_nodes.csv to {out_dir}")
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--data", default="../data", help="папка с parquet-файлами")
-    ap.add_argument("--out", default="./out", help="куда писать выгрузки")
-    a = ap.parse_args()
+    ap=argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--data",type=Path,default=Path("../data")); ap.add_argument("--out",type=Path,default=Path("./output"))
+    a=ap.parse_args(); edges,nodes,tx=load(a.data)
+    G=build_graph(edges,nodes); df=basic_features(G,nodes,edges); df,_=analyze(df,G); write_outputs(df,nx.Graph(G.to_undirected()),tx,a.out)
 
-    edges, nodes, tx = load(Path(a.data))
-    sanity_check(edges, nodes, tx)
-    G = build_graph(edges)
-    df = basic_features(G, nodes)
-    write_outputs(df, Path(a.out))
-    hints(G, df)
-
-
-if __name__ == "__main__":
-    main()
+if __name__=="__main__": main()
