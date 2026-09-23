@@ -1,6 +1,6 @@
-"""Analyze precomputed node metrics; optionally cluster from a transaction edge CSV.
+"""Analyze precomputed per-node metrics without rebuilding the transaction graph.
 
-Usage: python3 src/pipeline.py --input output/node_metrics.csv [--edges output/edges.csv]
+Usage from repository root: python3 src/pipeline.py [--input PATH] [--output-dir output]
 """
 from __future__ import annotations
 
@@ -10,15 +10,12 @@ from collections import Counter, defaultdict
 from pathlib import Path
 import sys
 
-from clustering import louvain
 from export import export
 from priority import priority_score
-from roles import classify, is_seed, key_name, number
+from roles import classify, is_seed, key_name
 
 
 GID_NAMES = {"gid", "node_id", "node", "account_id"}
-SOURCE_NAMES = {"source", "source_gid", "src", "from_gid", "sender_gid", "from"}
-TARGET_NAMES = {"target", "target_gid", "dst", "to_gid", "receiver_gid", "to"}
 
 
 def find_value(row, names):
@@ -38,23 +35,7 @@ def load_input(path):
     return rows
 
 
-def parse_edges(rows, known_gids):
-    """Parse directed transaction edges for an undirected weighted Louvain projection."""
-    edges = []
-    for index, row in enumerate(rows, start=2):
-        source = str(find_value(row, SOURCE_NAMES)).strip()
-        target = str(find_value(row, TARGET_NAMES)).strip()
-        if not source or not target:
-            raise ValueError(f"В edges CSV строка {index} должна содержать source и target.")
-        if source not in known_gids or target not in known_gids:
-            raise ValueError(f"В edges CSV строка {index} ссылается на gid вне node_metrics.csv.")
-        weight = max(0.0, number(row, "amount"))
-        if weight > 0:
-            edges.append((source, target, weight))
-    return edges
-
-
-def analyze(rows, edge_rows=None):
+def analyze(rows):
     metrics = {}
     for row in rows:
         gid = str(find_value(row, GID_NAMES)).strip()
@@ -67,11 +48,9 @@ def analyze(rows, edge_rows=None):
         raise ValueError("node_metrics.csv не содержит строк с узлами.")
 
     all_gids = sorted(metrics)
-    edge_rows = list(edge_rows or [])
-    # louvain() aggregates directed weights into an undirected weighted projection.
-    cluster_map = louvain(all_gids, edge_rows) if edge_rows else {
-        gid: index for index, gid in enumerate(all_gids, start=1)
-    }
+    # Aggregated node metrics do not contain transaction endpoints. Do not construct an
+    # inferred graph: until community IDs are supplied, use explicit singleton fallbacks.
+    cluster_map = {gid: index for index, gid in enumerate(all_gids, start=1)}
     node_results = []
     for gid in all_gids:
         row = metrics[gid]
@@ -84,20 +63,13 @@ def analyze(rows, edge_rows=None):
     for row in node_results:
         grouped[row["cluster_id"]].append(row)
     internal = defaultdict(float)
-    for source, target, weight in edge_rows:
-        if cluster_map[source] == cluster_map[target]:
-            internal[cluster_map[source]] += weight
     clusters = []
     for cluster_id, members in sorted(grouped.items()):
         roles = Counter(row["role"] for row in members)
         dominant, count = roles.most_common(1)[0]
         seed_count = sum(row["_seed"] for row in members)
-        if edge_rows:
-            hypothesis = (f"Louvain на взвешенной неориентированной проекции: роль {dominant}; "
-                          f"seed-узлов: {seed_count}.")
-        else:
-            hypothesis = (f"В node_metrics.csv нет исходных связей; узел оставлен в отдельном кластере. "
-                          f"Роль: {dominant}; seed-узлов: {seed_count}.")
+        hypothesis = (f"В node_metrics.csv нет исходных связей; узел оставлен в отдельном кластере. "
+                      f"Роль: {dominant}; seed-узлов: {seed_count}.")
         top = sorted(members, key=lambda row: (-row["priority_score"], row["gid"]))[:5]
         clusters.append({"cluster_id": cluster_id, "n_nodes": len(members), "n_seed": seed_count,
                          "sum_kzt_internal": round(internal[cluster_id], 2),
@@ -112,7 +84,6 @@ def main(argv=None):
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, help="node_metrics.csv (одна агрегированная строка на gid)")
-    parser.add_argument("--edges", type=Path, help="опциональный CSV source,target,amount для Louvain")
     parser.add_argument("--output-dir", type=Path, default=root / "output")
     args = parser.parse_args(argv)
     if args.input:
@@ -122,14 +93,7 @@ def main(argv=None):
         input_path = next((p for p in candidates if p.is_file()), candidates[0])
     output_dir = args.output_dir if args.output_dir.is_absolute() else root / args.output_dir
     try:
-        metric_rows = load_input(input_path)
-        gids = {str(find_value(row, GID_NAMES)).strip() for row in metric_rows}
-        if args.edges:
-            edges_path = args.edges if args.edges.is_absolute() else root / args.edges
-            edge_rows = parse_edges(load_input(edges_path), gids)
-        else:
-            edge_rows = []
-        nodes, clusters = analyze(metric_rows, edge_rows=edge_rows)
+        nodes, clusters = analyze(load_input(input_path))
         if len(nodes) < 20:
             raise ValueError(f"Для файла top_nodes.csv требуется минимум 20 узлов; найдено {len(nodes)}.")
         export(nodes, clusters, output_dir)

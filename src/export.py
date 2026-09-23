@@ -4,10 +4,6 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
-NODES_ROLES_COLUMNS = ("gid", "role", "role_score", "cluster_id", "priority_score", "evidence")
-CLUSTERS_COLUMNS = ("cluster_id", "n_nodes", "n_seed", "sum_kzt_internal", "top_gids", "hypothesis")
-TOP_NODES_COLUMNS = ("rank", "gid", "role", "priority_score", "why")
-
 
 def write_csv(path, columns, rows):
     path = Path(path)
@@ -20,10 +16,12 @@ def write_csv(path, columns, rows):
 
 def export(nodes, clusters, output_dir):
     output_dir = Path(output_dir)
-    write_csv(output_dir / "nodes_roles.csv", NODES_ROLES_COLUMNS, nodes)
-    write_csv(output_dir / "clusters.csv", CLUSTERS_COLUMNS, clusters)
+    write_csv(output_dir / "nodes_roles.csv",
+              ["gid", "role", "role_score", "cluster_id", "priority_score", "evidence"], nodes)
+    write_csv(output_dir / "clusters.csv",
+              ["cluster_id", "n_nodes", "n_seed", "sum_kzt_internal", "top_gids", "hypothesis"], clusters)
     ranked = sorted(nodes, key=lambda row: (-float(row["priority_score"]), str(row["gid"])))[:max(20, min(100, len(nodes)))]
-    write_csv(output_dir / "top_nodes.csv", TOP_NODES_COLUMNS,
+    write_csv(output_dir / "top_nodes.csv", ["rank", "gid", "role", "priority_score", "why"],
               [dict(rank=i, gid=row["gid"], role=row["role"], priority_score=row["priority_score"],
                     why=f"Приоритет {float(row['priority_score']):.3f}/1. {row['evidence']}")
                for i, row in enumerate(ranked, 1)])
