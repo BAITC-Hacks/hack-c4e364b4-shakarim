@@ -88,7 +88,7 @@ class PriorityTests(unittest.TestCase):
         with_seed = priority_score({**metrics, "is_seed": "true"})
         self.assertAlmostEqual(with_seed - without_seed, .1, places=3)
         self.assertGreaterEqual(with_seed, 0)
-        self.assertLessEqual(with_seed, 100)
+        self.assertLessEqual(with_seed, 1)
 
 
 class ClusteringTests(unittest.TestCase):

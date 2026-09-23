@@ -1,7 +1,6 @@
 """End-to-end integration tests for the merged financial network pipeline."""
 from __future__ import annotations
 
-import re
 import sys
 import tempfile
 import time
@@ -317,8 +316,8 @@ class GraphAndMetricsTests(unittest.TestCase):
 class PipelineIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.data_dir = loader.find_data_dir()
-        cls._temporary_output = tempfile.TemporaryDirectory(prefix="dev1-integration-")
+        cls.data_dir = loader.find_data_dir().resolve()
+        cls._temporary_output = tempfile.TemporaryDirectory(prefix="traceflow-integration-")
         cls.addClassCleanup(cls._temporary_output.cleanup)
         cls.output_dir = Path(cls._temporary_output.name)
         cls.edges, cls.nodes, cls.tx = loader.load(cls.data_dir)
@@ -329,7 +328,7 @@ class PipelineIntegrationTests(unittest.TestCase):
         cls.metrics_df = pd.read_csv(cls.output_dir / "node_metrics.csv")
         cls.nodes_roles = pd.read_csv(cls.output_dir / "nodes_roles.csv")
         cls.clusters = pd.read_csv(cls.output_dir / "clusters.csv")
-        cls.top_nodes = pd.read_csv(cls.output_dir / "top_nodes.csv")
+        cls.top_nodes = pd.read_csv(cls.output_dir / "top_nodes.csv", dtype={"gid": "string"})
 
     def test_data_loader(self):
         self.assertGreater(len(self.edges), 0)
@@ -396,7 +395,8 @@ class PipelineIntegrationTests(unittest.TestCase):
         valid_roles = {"consolidator", "distributor", "transit", "terminal", "coordinator", "peripheral"}
         self.assertTrue(set(self.nodes_roles["role"]).issubset(valid_roles))
         self.assertTrue(self.nodes_roles["role_score"].between(0, 1).all())
-        self.assertTrue(self.nodes_roles["priority_score"].between(0, 100).all())
+        self.assertTrue(self.nodes_roles["priority_score"].between(0, 1).all())
+        self.assertTrue(self.nodes_roles["evidence"].str.len().between(1, 200).all())
 
     def test_clusters_contract(self):
         expected_cols = ["cluster_id", "n_nodes", "n_seed", "sum_kzt_internal", "top_gids", "hypothesis"]
@@ -411,19 +411,53 @@ class PipelineIntegrationTests(unittest.TestCase):
         self.assertGreaterEqual(len(self.top_nodes), 20)
         self.assertListEqual(self.top_nodes["rank"].tolist(), list(range(1, len(self.top_nodes) + 1)))
         self.assertTrue(self.top_nodes["priority_score"].is_monotonic_decreasing)
+        self.assertTrue(self.top_nodes["priority_score"].between(0, 1).all())
+
+    def test_metrics_and_edge_exports_reproduce_parquet_analysis(self):
+        csv_output = self.output_dir / "from-metrics"
+        status = pipeline.main([
+            "--input", str(self.output_dir / "node_metrics.csv"),
+            "--edges", str(self.output_dir / "edges.csv"),
+            "--output-dir", str(csv_output),
+        ])
+        self.assertEqual(status, 0)
+        for filename in ("nodes_roles.csv", "clusters.csv", "top_nodes.csv"):
+            with self.subTest(filename=filename):
+                expected = pd.read_csv(self.output_dir / filename, dtype={"gid": "string"})
+                actual = pd.read_csv(csv_output / filename, dtype={"gid": "string"})
+                pd.testing.assert_frame_equal(actual, expected)
+        exported_edges = pd.read_csv(self.output_dir / "edges.csv")
+        pd.testing.assert_frame_equal(exported_edges, self.edges)
 
 
-class StreamlitUIIntegrationTests(unittest.TestCase):
+    def launch_ui(self):
+        import app as ui_app
+        import data_access
+        import streamlit as st
+
+        st.cache_data.clear()
+        self.addCleanup(st.cache_data.clear)
+        for module in (ui_app, data_access):
+            replacement = patch.multiple(module, RESULTS_DIR=self.output_dir, DATA_DIR=self.data_dir)
+            replacement.start()
+            self.addCleanup(replacement.stop)
+        app = AppTest.from_string("import app\napp.main()", default_timeout=40).run()
+        self.assertEqual([error.message for error in app.exception], [])
+        return app
+
     def test_app_renders_main_view(self):
-        app = AppTest.from_file(str(ROOT / "ui/app.py"), default_timeout=30).run()
-        self.assertEqual(len(app.exception), 0)
+        app = self.launch_ui()
+        self.assertEqual(app.session_state.traceflow_active_gid, self.top_nodes.iloc[0].gid)
 
     def test_search_and_select_client(self):
-        app = AppTest.from_file(str(ROOT / "ui/app.py"), default_timeout=30).run()
-        top_nodes = pd.read_csv(ROOT / "output/top_nodes.csv")
-        test_gid = str(top_nodes.iloc[0]["gid"])
-        app.sidebar.text_input[0].set_value(test_gid).run()
-        self.assertEqual(len(app.exception), 0)
+        app = self.launch_ui()
+        initial_gid = app.session_state.traceflow_active_gid
+        test_gid = next(gid for gid in self.top_nodes.gid if gid != initial_gid)
+        next(widget for widget in app.text_input if widget.label == "Найти клиента по GID").set_value(test_gid)
+        next(button for button in app.button if button.label == "Открыть профиль").click().run()
+        self.assertEqual([error.message for error in app.exception], [])
+        self.assertEqual(app.session_state.traceflow_active_gid, test_gid)
+        self.assertIsInstance(app.session_state.traceflow_active_gid, str)
 
 
 if __name__ == "__main__":

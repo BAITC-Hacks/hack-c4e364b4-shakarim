@@ -52,11 +52,11 @@ def role_label(role: Any) -> str:
     return ROLE_LABELS.get(key, str(role).strip() or "Не определена")
 
 
-def format_score(value: Any) -> str:
+def format_score(value: Any, decimals: int = 2) -> str:
     if value is None or pd.isna(value):
         return "—"
     try:
-        return f"{float(value):.2f}"
+        return f"{float(value):.{decimals}f}"
     except (TypeError, ValueError):
         return escape(str(value))
 
@@ -76,6 +76,54 @@ def role_badge(role: Any) -> str:
     return f'<span class="role-badge" style="--role:{color}"><i></i>{label}</span>'
 
 
+def open_client(gid: object) -> None:
+    """Widget callback: all entry points open the same string-ID profile."""
+    st.session_state.traceflow_active_gid = normalise_id(gid)
+    st.session_state.traceflow_tab = "Dashboard"
+
+
+def open_selected_client(widget_key: str) -> None:
+    open_client(st.session_state[widget_key])
+
+
+def return_to_previous_client() -> None:
+    history = st.session_state.get("traceflow_history", [])
+    if history:
+        gid = history.pop()
+        st.session_state.traceflow_last_gid = gid
+        open_client(gid)
+
+
+def investigation_brief(client: pd.Series, priority_reason: object, edges: pd.DataFrame,
+                        source: str, priority_maximum: int = 1) -> str:
+    """Portable evidence note; export supplied conclusions without re-scoring."""
+    gid = normalise_id(client.gid)
+    lines = ["# TraceFlow · сводка проверки", "", f"GID: {gid}", f"Источник: {source}",
+             f"Роль (гипотеза): {role_label(client.get('role'))}",
+             f"Оценка роли: {format_score(client.get('role_score'))}",
+             f"Кластер: {normalise_id(client.get('cluster_id'))}",
+             f"Приоритет: {format_score(client.get('priority_score'), 3 if priority_maximum == 1 else 2)} / {priority_maximum}",
+             "", "## Обоснование роли из CSV", str(client.get("evidence", "Не передано")),
+             "", "## Причина приоритета из CSV",
+             str(priority_reason) if pd.notna(priority_reason) and str(priority_reason).strip() else "Не передана.",
+             "", "## Наблюдаемые связи"]
+    if edges.attrs.get("load_error"):
+        lines.append("Связи недоступны: " + edges.attrs["load_error"])
+    else:
+        incident = edges.loc[edges.src.map(normalise_id).eq(gid) | edges.dst.map(normalise_id).eq(gid)]
+        lines.append(f"Всего направленных связей: {len(incident)}. Сводка включает все страницы графа.")
+        for row in incident.itertuples():
+            lines.append(f"- {normalise_id(row.src)} → {normalise_id(row.dst)}; {format_money(getattr(row, 'sum_kzt', None))}")
+    lines.extend(["", "## Ограничения", "Роль и кластер — гипотезы для проверки. Оценка роли не является вероятностью нарушения.",
+                  "Июль 2026; внутрибанковские переводы от 5 000 ₸; обход по исходящим до 4 колен.",
+                  "Отсутствие наблюдаемых связей не доказывает отсутствие активности вне выборки."])
+    if str(client.get("is_seed", "")).lower() in {"true", "1", "1.0"}:
+        lines.append("SEED: входящий поток неполон; сопоставление входа и выхода не отражает полный баланс.")
+    if str(client.get("depth", "")) in {"4", "4.0"}:
+        lines.append("DEPTH=4: граница выгрузки; дальнейшие переводы могут быть неизвестны.")
+    return "\n".join(lines) + "\n"
+
+
 def inject_styles() -> None:
     """Apply a self-contained premium dark product system without external assets."""
     st.markdown(
@@ -88,7 +136,9 @@ def inject_styles() -> None:
         html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
         [data-testid="stAppViewContainer"] { background:radial-gradient(circle at 76% -12%, #1d2c673b 0, transparent 31%), var(--bg); color:var(--text); }
         [data-testid="stHeader"] { background:transparent; height:0; }
-        [data-testid="stToolbar"], [data-testid="stStatusWidget"], [data-testid="stDeployButton"], #MainMenu, footer { display:none !important; }
+        [data-testid="stStatusWidget"], [data-testid="stToolbarActions"], [data-testid="stDeployButton"], #MainMenu, footer { display:none !important; }
+        [data-testid="stHeader"]:has([data-testid="stExpandSidebarButton"]) { height:2.8rem; background:#0B101C; }
+        [data-testid="stExpandSidebarButton"]::after { content:"Поиск GID"; font-size:.8rem; color:#EAF0FF; padding:0 .45rem; }
         [data-testid="stDecoration"] { display:none; }
         .block-container { max-width:1580px; padding:1.4rem 2.3rem 3.5rem; }
         [data-testid="stSidebar"] { background:#0B101C; border-right:1px solid #202a3d; }
@@ -164,7 +214,7 @@ def inject_styles() -> None:
         @keyframes pulse { 50% { opacity:.45; transform:scale(.72); } }
         @keyframes panel-in { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
         @media(prefers-reduced-motion:reduce) { *, *::before, *::after { animation-duration:.01ms !important; animation-iteration-count:1 !important; scroll-behavior:auto !important; transition-duration:.01ms !important; } }
-        @media(max-width:900px) { .block-container { padding:1rem 1rem 2.5rem; } .stat-grid { grid-template-columns:repeat(2,1fr); } .hero-title { font-size:1.7rem; } .metric-grid { grid-template-columns:1fr; } }
+        @media(max-width:900px) { .block-container { padding:3rem 1rem 2.5rem; } .stat-grid { grid-template-columns:repeat(2,1fr); } .hero-title { font-size:1.7rem; } .metric-grid { grid-template-columns:1fr; } }
         </style>
         """,
         unsafe_allow_html=True,
@@ -260,7 +310,7 @@ def render_client_card(client: pd.Series, priority_reason: object = None, priori
           <div class="panel-body">
             <div class="metric-grid">
               <div class="metric"><div class="metric-label">Оценка роли</div><div class="metric-value">{format_score(client.get("role_score"))}</div></div>
-              <div class="metric"><div class="metric-label">Приоритет / {priority_maximum}</div><div class="metric-value">{format_score(client.get("priority_score"))}</div></div>
+              <div class="metric"><div class="metric-label">Приоритет / {priority_maximum}</div><div class="metric-value">{format_score(client.get("priority_score"), 3 if priority_maximum == 1 else 2)}</div></div>
               <div class="metric"><div class="metric-label">Кластер</div><div class="metric-value">#{escape(normalise_id(client.get("cluster_id")) or "—")}</div></div>
             </div>
             <div class="evidence"><div class="evidence-label">Обоснование роли</div>{escape(evidence_text)}</div>
@@ -314,14 +364,23 @@ def render_cluster(client: pd.Series, nodes: pd.DataFrame, clusters: pd.DataFram
             )
 
 
-def render_top_nodes(top_nodes: pd.DataFrame, limit: int = 20, priority_maximum: int = 1) -> None:
+def render_top_nodes(top_nodes: pd.DataFrame, limit: int = 20, priority_maximum: int = 1, *, key: str = "top") -> None:
+    if not top_nodes.empty:
+        picker, action = st.columns([3, 1], vertical_alignment="bottom")
+        choices = top_nodes.gid.map(normalise_id).tolist()
+        labels = {normalise_id(row.gid): f"#{row.rank} · {normalise_id(row.gid)} · {role_label(row.role)}"
+                  for row in top_nodes.itertuples()}
+        with picker:
+            gid = st.selectbox("Открыть из очереди проверки", choices, format_func=labels.get, key=f"{key}_gid")
+        with action:
+            st.button("Открыть GID", key=f"{key}_open", on_click=open_selected_client, args=(f"{key}_gid",), width="stretch")
     rows: list[str] = []
     for fallback_rank, (_, row) in enumerate(top_nodes.head(limit).iterrows(), start=1):
         rank = escape(str(row.get("rank", fallback_rank)))
         gid = escape(normalise_id(row.get("gid")) or "—")
         why = escape(str(row.get("why", row.get("evidence", "—"))))
         rows.append(
-            f"<tr><td class='rank'>#{rank}</td><td><b>{gid}</b></td><td>{role_badge(row.get('role'))}</td><td><b>{format_score(row.get('priority_score'))}</b></td><td class='quiet'>{why}</td></tr>"
+            f"<tr><td class='rank'>#{rank}</td><td><b>{gid}</b></td><td>{role_badge(row.get('role'))}</td><td><b>{format_score(row.get('priority_score'), 3 if priority_maximum == 1 else 2)}</b></td><td class='quiet'>{why}</td></tr>"
         )
     body = "".join(rows) or "<tr><td colspan='5' class='quiet'>Нет узлов в очереди проверки.</td></tr>"
     st.markdown(

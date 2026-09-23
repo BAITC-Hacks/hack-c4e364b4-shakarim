@@ -1,25 +1,28 @@
 # Аналитический модуль
 
-Модуль анализирует готовый `node_metrics.csv`. Он не пересчитывает графовые метрики и не строит исходный граф заново. Для каждого `gid` он назначает роль, считает `role_score` и `priority_score`, формирует пояснение `evidence` и сохраняет три CSV-отчёта.
+Аналитический этап анализирует готовые метрики узлов. Для каждого `gid` он назначает роль, считает `role_score` и `priority_score`, формирует пояснение `evidence` и сохраняет три CSV-отчёта. Общий `src/pipeline.py` в `main` также умеет сначала загрузить Parquet, проверить данные и рассчитать графовые метрики.
 
 ## Запуск
 
-Минимальный запуск использует только подготовленные метрики:
+Полный запуск из исходных Parquet:
 
-```bash
-python3.12 src/pipeline.py --input output/node_metrics.csv --output-dir output
+```powershell
+python src/pipeline.py --data data --output-dir output
+```
+
+Он сохраняет `node_metrics.csv`, `edges.csv` и три аналитических отчёта. Для повторного запуска аналитического этапа по готовым метрикам:
+
+```powershell
+python src/pipeline.py --input output/node_metrics.csv --output-dir output
 ```
 
 Чтобы выполнить кластеризацию Louvain, передайте CSV рёбер:
 
-```bash
-python3.12 src/pipeline.py \
-  --input output/node_metrics.csv \
-  --edges output/edges.csv \
-  --output-dir output
+```powershell
+python src/pipeline.py --input output/node_metrics.csv --edges output/edges.csv --output-dir output
 ```
 
-Без аргумента `--input` pipeline сначала ищет `output/node_metrics.csv`, затем `mock/node_metrics.csv`.
+Без аргументов pipeline ищет исходную папку Parquet и запускает полный расчёт; если исходных данных нет, использует готовый `node_metrics.csv` из каталога результатов. Для воспроизводимой демонстрации указывайте `--data` или `--input` явно.
 
 ## Входные данные
 
@@ -34,15 +37,15 @@ python3.12 src/pipeline.py \
 | `in_degree`, `out_degree` | Число входящих и исходящих соседей. |
 | `unique_senders`, `unique_receivers` | Число уникальных контрагентов. |
 | `in_tx_count`, `out_tx_count` | Число входящих и исходящих транзакций. |
-| `pass_ratio`, `pagerank`, `betweenness` | Сохранённые графовые метрики; в текущих правилах ролей напрямую не используются. |
+| `pass_through`, `pagerank`, `betweenness` | Сохранённые графовые метрики; в текущих правилах ролей напрямую не используются. Отношение потоков для правил рассчитывается из `in_amount` и `out_amount`. |
 
-`edges.csv` нужен только для Louvain. В нём необходимы отправитель, получатель и вес: `source`, `target`, `amount`. Поддерживаются также распространённые синонимы: например, `source_gid`, `target_gid`, `amount_kzt`, `sum_kzt`. Каждый `gid` в рёбрах должен присутствовать в `node_metrics.csv`.
+При анализе готовых метрик `edges.csv` нужен для кластеризации; UI использует его для направленного графа связей. Общий pipeline экспортирует `src`, `dst`, `sum_kzt`, `n_tx`, `depth`. Аналитический CSV-вход также поддерживает `source`, `target`, `amount` и синонимы `source_gid`, `target_gid`, `amount_kzt`. Каждый `gid` в рёбрах должен присутствовать в `node_metrics.csv`.
 
 ## Что делает каждый файл
 
 | Файл | Функция |
 | --- | --- |
-| `src/pipeline.py` | Читает CSV, проверяет уникальность `gid`, запускает роли, приоритеты, кластеризацию и экспорт. |
+| `src/pipeline.py` | Запускает полный расчёт из Parquet или читает готовые CSV, проверяет уникальность `gid`, запускает роли, приоритеты, кластеризацию и экспорт. |
 | `src/roles.py` | Присваивает одну из шести ролей, считает `role_score`, создаёт короткий `evidence`. |
 | `src/priority.py` | Считает `priority_score` от 0 до 1. |
 | `src/clustering.py` | Выполняет детерминированный Louvain-style local move на взвешенной неориентированной проекции рёбер. |
@@ -84,7 +87,7 @@ python3.12 src/pipeline.py \
 
 Направление не теряется из аналитики: входящие и исходящие суммы, степени и транзакционные счётчики остаются в строке `node_metrics.csv` и используются в правилах ролей и приоритета.
 
-Если `--edges` не передан, связи нельзя восстановить из агрегированных метрик. Pipeline честно назначает каждому узлу отдельный `cluster_id`, а `clusters.csv` сообщает об отсутствии исходных связей.
+При запуске с `--input` без `--edges` связи нельзя восстановить из агрегированных метрик. Pipeline назначает каждому узлу отдельный `cluster_id`, а `clusters.csv` сообщает об отсутствии исходных связей. В полном запуске через `--data` используются направленные рёбра из Parquet.
 
 ## Выходные файлы
 
@@ -116,8 +119,9 @@ rank,gid,role,priority_score,why
 
 ## Тесты
 
-```bash
-python3.12 -m unittest discover -s tests -v
+```powershell
+python -m pip install -r requirements-test.txt
+python -m unittest discover -s tests -v
 ```
 
-Тесты не требуют сторонних библиотек. Они проверяют все шесть ролей, диапазоны score, evidence, границу `depth=4`, Louvain-проекцию, фиксированные колонки экспорта и минимальный размер TOP-отчёта.
+Зависимости общего pipeline и тестов перечислены в `requirements-test.txt`. Проверяются все шесть ролей, диапазоны score, evidence, граница `depth=4`, Louvain-проекция, фиксированные колонки экспорта и минимальный размер TOP-отчёта, а также валидация данных, метрики и интерфейс. Только аналитические проверки: `python -m unittest discover -s tests -p test_analytics.py -v`.

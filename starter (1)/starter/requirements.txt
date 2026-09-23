@@ -1,6 +1,0 @@
-pandas>=2.2,<3.0
-pyarrow>=14.0
-networkx>=3.2
-numpy>=1.26,<2.0
-streamlit>=1.32
-pyvis>=0.3.2
