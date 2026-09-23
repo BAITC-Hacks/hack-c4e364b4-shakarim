@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from html import escape
 from typing import Any
 
 import pandas as pd
@@ -17,6 +18,19 @@ ROLE_COLORS = {
     "peripheral": "#64748B",
 }
 DEFAULT_ROLE_COLOR = "#94A3B8"
+
+
+def normalise_id(value: Any) -> str:
+    """Make CSV ids comparable when one file parsed them as int and another as float."""
+    if value is None or pd.isna(value):
+        return ""
+    text = str(value).strip()
+    if text.endswith(".0"):
+        try:
+            return str(int(float(text)))
+        except ValueError:
+            pass
+    return text
 
 
 def inject_styles() -> None:
@@ -86,6 +100,7 @@ def format_score(value: Any) -> str:
 
 def role_badge(role: Any) -> str:
     label = str(role).strip() if pd.notna(role) and str(role).strip() else "not assigned"
+    label = escape(label)
     return (
         f'<span style="background:{role_color(role)};color:white;border-radius:999px;'
         f'padding:0.28rem 0.65rem;font-weight:650;font-size:0.9rem">{label}</span>'
@@ -100,7 +115,7 @@ def render_role_legend() -> None:
 def render_client_card(client: pd.Series) -> None:
     """Show only fields prepared by the analytics pipeline."""
     st.markdown('<div class="tf-eyebrow">Selected subject</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="tf-panel-title" style="font-size:1.35rem">Client {client["gid"]}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="tf-panel-title" style="font-size:1.35rem">Client {escape(str(client["gid"]))}</div>', unsafe_allow_html=True)
     st.markdown(role_badge(client.get("role")), unsafe_allow_html=True)
 
     left, middle, right = st.columns(3)
@@ -111,7 +126,7 @@ def render_client_card(client: pd.Series) -> None:
     evidence = client.get("evidence")
     st.markdown('<div class="tf-eyebrow">Evidence from pipeline</div>', unsafe_allow_html=True)
     text = str(evidence) if pd.notna(evidence) and str(evidence).strip() else "Нет объяснения в выгрузке."
-    st.markdown(f'<div class="tf-evidence">{text}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="tf-evidence">{escape(text)}</div>', unsafe_allow_html=True)
 
 
 def render_top_nodes(top_nodes: pd.DataFrame) -> None:
@@ -134,8 +149,9 @@ def render_cluster(client: pd.Series, nodes: pd.DataFrame, clusters: pd.DataFram
         st.info("Для клиента не указан кластер.")
         return
 
-    cluster_row = clusters.loc[clusters["cluster_id"].astype(str) == str(cluster_id)] if "cluster_id" in clusters else pd.DataFrame()
-    members = nodes.loc[nodes["cluster_id"].astype(str) == str(cluster_id)] if "cluster_id" in nodes else pd.DataFrame()
+    cluster_key = normalise_id(cluster_id)
+    cluster_row = clusters.loc[clusters["cluster_id"].map(normalise_id) == cluster_key] if "cluster_id" in clusters else pd.DataFrame()
+    members = nodes.loc[nodes["cluster_id"].map(normalise_id) == cluster_key] if "cluster_id" in nodes else pd.DataFrame()
 
     if not cluster_row.empty:
         details = cluster_row.iloc[0]
