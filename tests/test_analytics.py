@@ -15,15 +15,22 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from clustering import louvain
-from pipeline import main
+from export import CLUSTERS_COLUMNS, NODES_ROLES_COLUMNS, TOP_NODES_COLUMNS
+from pipeline import analyze, main, parse_edges
 from priority import priority_score
-from roles import classify
+from roles import MAX_EVIDENCE_LENGTH, ROLE_RULES, classify
 
 
 class RoleClassificationTests(unittest.TestCase):
+    def test_role_rules_are_documented_in_evaluation_order(self):
+        self.assertEqual(len(ROLE_RULES), 7)
+        self.assertTrue(ROLE_RULES[0].startswith("peripheral"))
+        self.assertTrue(ROLE_RULES[1].startswith("terminal"))
+        self.assertTrue(ROLE_RULES[2].startswith("coordinator"))
+
     def test_assigns_each_of_six_roles_for_explainable_examples(self):
         examples = {
-            "consolidator": {"in_amount": 10_000, "out_amount": 500, "unique_senders": 11, "unique_receivers": 2},
+            "consolidator": {"in_amount": 10_000, "out_amount": 3_000, "unique_senders": 11, "unique_receivers": 2},
             "distributor": {"in_amount": 500, "out_amount": 10_000, "unique_senders": 2, "unique_receivers": 11},
             "transit": {"in_amount": 10_000, "out_amount": 9_200, "unique_senders": 4, "unique_receivers": 4},
             "terminal": {"in_amount": 10_000, "out_amount": 100, "unique_senders": 5, "unique_receivers": 0, "depth": 2, "out_degree": 0},
@@ -37,6 +44,31 @@ class RoleClassificationTests(unittest.TestCase):
                 self.assertGreaterEqual(score, 0.05)
                 self.assertLessEqual(score, 1.0)
                 self.assertTrue(evidence)
+                self.assertLessEqual(len(evidence), MAX_EVIDENCE_LENGTH)
+
+    def test_evidence_has_concrete_values_and_is_at_most_two_hundred_characters(self):
+        _, _, evidence = classify({
+            "in_amount": 10_000, "out_amount": 9_200, "unique_senders": 4,
+            "unique_receivers": 4, "in_tx_count": 4, "out_tx_count": 4,
+        })
+        self.assertIn("10,000", evidence)
+        self.assertIn("92%", evidence)
+        self.assertLessEqual(len(evidence), 200)
+
+    def test_terminal_precedes_consolidator_for_low_pass_through(self):
+        role, _, evidence = classify({
+            "in_amount": 10_000, "out_amount": 1_000, "unique_senders": 10,
+            "unique_receivers": 1, "in_tx_count": 10, "out_tx_count": 1, "depth": 2,
+        })
+        self.assertEqual(role, "terminal")
+        self.assertIn("10%", evidence)
+
+    def test_coordinator_precedes_transit_when_both_rules_match(self):
+        role, _, _ = classify({
+            "in_amount": 10_000, "out_amount": 9_200, "unique_senders": 6,
+            "unique_receivers": 6, "in_tx_count": 6, "out_tx_count": 6,
+        })
+        self.assertEqual(role, "coordinator")
 
     def test_depth_four_zero_out_degree_is_not_terminal_evidence(self):
         metrics = {
@@ -50,11 +82,11 @@ class RoleClassificationTests(unittest.TestCase):
 
 
 class PriorityTests(unittest.TestCase):
-    def test_seed_adds_ten_points_and_score_is_bounded(self):
+    def test_seed_adds_one_tenth_and_score_is_bounded(self):
         metrics = {"in_amount": 500_000, "out_amount": 250_000, "unique_senders": 4, "unique_receivers": 5}
         without_seed = priority_score(metrics)
         with_seed = priority_score({**metrics, "is_seed": "true"})
-        self.assertEqual(with_seed - without_seed, 10)
+        self.assertAlmostEqual(with_seed - without_seed, .1, places=3)
         self.assertGreaterEqual(with_seed, 0)
         self.assertLessEqual(with_seed, 100)
 
@@ -79,6 +111,28 @@ class ClusteringTests(unittest.TestCase):
 
 
 class PipelineTests(unittest.TestCase):
+    def test_requires_one_precomputed_metrics_row_per_gid(self):
+        with self.assertRaisesRegex(ValueError, "должна содержать gid"):
+            analyze([{"source_gid": "a", "target_gid": "b", "amount_kzt": 10}])
+        with self.assertRaisesRegex(ValueError, "повторяется gid"):
+            analyze([{"gid": "a"}, {"gid": "a"}])
+
+    def test_uses_weighted_undirected_projection_when_edges_are_supplied(self):
+        metrics = [{"gid": gid, "in_amount": 100, "out_amount": 90,
+                    "unique_senders": 3, "unique_receivers": 3}
+                   for gid in ("a", "b", "c", "x", "y", "z")]
+        edges = [("a", "b", 10), ("b", "c", 10), ("c", "a", 10),
+                 ("x", "y", 10), ("y", "z", 10), ("z", "x", 10)]
+        nodes, clusters = analyze(metrics, edge_rows=edges)
+        cluster_by_gid = {row["gid"]: row["cluster_id"] for row in nodes}
+        self.assertEqual(cluster_by_gid["a"], cluster_by_gid["b"])
+        self.assertNotEqual(cluster_by_gid["a"], cluster_by_gid["x"])
+        self.assertEqual(sum(cluster["sum_kzt_internal"] for cluster in clusters), 60)
+
+    def test_rejects_edges_outside_metrics_scope(self):
+        with self.assertRaisesRegex(ValueError, "вне node_metrics.csv"):
+            parse_edges([{"source": "known", "target": "unknown", "amount": 1}], {"known"})
+
     def test_exports_required_files_and_top_twenty_from_node_metrics(self):
         fields = ["gid", "depth", "is_seed", "in_degree", "out_degree", "in_amount", "out_amount",
                   "unique_senders", "unique_receivers", "in_tx_count", "out_tx_count", "pass_ratio",
@@ -101,16 +155,16 @@ class PipelineTests(unittest.TestCase):
             result = main(["--input", str(input_path), "--output-dir", str(output_dir)])
             self.assertEqual(result, 0)
             expected_headers = {
-                "nodes_roles.csv": ["gid", "role", "role_score", "cluster_id", "priority_score", "evidence"],
-                "clusters.csv": ["cluster_id", "n_nodes", "n_seed", "sum_kzt_internal", "top_gids", "hypothesis"],
-                "top_nodes.csv": ["rank", "gid", "role", "priority_score", "why"],
+                "nodes_roles.csv": NODES_ROLES_COLUMNS,
+                "clusters.csv": CLUSTERS_COLUMNS,
+                "top_nodes.csv": TOP_NODES_COLUMNS,
             }
             for filename, headers in expected_headers.items():
                 with self.subTest(file=filename):
                     with (output_dir / filename).open(encoding="utf-8-sig", newline="") as stream:
                         reader = csv.DictReader(stream)
                         rows = list(reader)
-                    self.assertEqual(reader.fieldnames, headers)
+                    self.assertEqual(tuple(reader.fieldnames), headers)
                     self.assertEqual(len(rows), 25)
             with (output_dir / "top_nodes.csv").open(encoding="utf-8-sig", newline="") as stream:
                 self.assertEqual([row["rank"] for row in csv.DictReader(stream)], [str(i) for i in range(1, 26)])
