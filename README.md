@@ -83,10 +83,10 @@ UI не определяет роли и не пересчитывает ана�
 ```bash
 git clone https://github.com/BAITC-Hacks/hack-c4e364b4-shakarim.git
 cd hack-c4e364b4-shakarim
-git switch analytics
+git switch main
 ```
 
-Инструкция относится к интегрированной версии в ветке `analytics`.
+Инструкция относится к интегрированной версии в ветке `main`.
 
 ### macOS / Linux
 
