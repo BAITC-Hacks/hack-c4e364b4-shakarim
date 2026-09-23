@@ -15,7 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from clustering import louvain
-from pipeline import analyze, main
+from export import CLUSTERS_COLUMNS, NODES_ROLES_COLUMNS, TOP_NODES_COLUMNS
+from pipeline import analyze, main, parse_edges
 from priority import priority_score
 from roles import MAX_EVIDENCE_LENGTH, ROLE_RULES, classify
 
@@ -116,6 +117,22 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "повторяется gid"):
             analyze([{"gid": "a"}, {"gid": "a"}])
 
+    def test_uses_weighted_undirected_projection_when_edges_are_supplied(self):
+        metrics = [{"gid": gid, "in_amount": 100, "out_amount": 90,
+                    "unique_senders": 3, "unique_receivers": 3}
+                   for gid in ("a", "b", "c", "x", "y", "z")]
+        edges = [("a", "b", 10), ("b", "c", 10), ("c", "a", 10),
+                 ("x", "y", 10), ("y", "z", 10), ("z", "x", 10)]
+        nodes, clusters = analyze(metrics, edge_rows=edges)
+        cluster_by_gid = {row["gid"]: row["cluster_id"] for row in nodes}
+        self.assertEqual(cluster_by_gid["a"], cluster_by_gid["b"])
+        self.assertNotEqual(cluster_by_gid["a"], cluster_by_gid["x"])
+        self.assertEqual(sum(cluster["sum_kzt_internal"] for cluster in clusters), 60)
+
+    def test_rejects_edges_outside_metrics_scope(self):
+        with self.assertRaisesRegex(ValueError, "вне node_metrics.csv"):
+            parse_edges([{"source": "known", "target": "unknown", "amount": 1}], {"known"})
+
     def test_exports_required_files_and_top_twenty_from_node_metrics(self):
         fields = ["gid", "depth", "is_seed", "in_degree", "out_degree", "in_amount", "out_amount",
                   "unique_senders", "unique_receivers", "in_tx_count", "out_tx_count", "pass_ratio",
@@ -138,16 +155,16 @@ class PipelineTests(unittest.TestCase):
             result = main(["--input", str(input_path), "--output-dir", str(output_dir)])
             self.assertEqual(result, 0)
             expected_headers = {
-                "nodes_roles.csv": ["gid", "role", "role_score", "cluster_id", "priority_score", "evidence"],
-                "clusters.csv": ["cluster_id", "n_nodes", "n_seed", "sum_kzt_internal", "top_gids", "hypothesis"],
-                "top_nodes.csv": ["rank", "gid", "role", "priority_score", "why"],
+                "nodes_roles.csv": NODES_ROLES_COLUMNS,
+                "clusters.csv": CLUSTERS_COLUMNS,
+                "top_nodes.csv": TOP_NODES_COLUMNS,
             }
             for filename, headers in expected_headers.items():
                 with self.subTest(file=filename):
                     with (output_dir / filename).open(encoding="utf-8-sig", newline="") as stream:
                         reader = csv.DictReader(stream)
                         rows = list(reader)
-                    self.assertEqual(reader.fieldnames, headers)
+                    self.assertEqual(tuple(reader.fieldnames), headers)
                     self.assertEqual(len(rows), 25)
             with (output_dir / "top_nodes.csv").open(encoding="utf-8-sig", newline="") as stream:
                 self.assertEqual([row["rank"] for row in csv.DictReader(stream)], [str(i) for i in range(1, 26)])
