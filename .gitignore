@@ -1,3 +1,6 @@
+.pytest_cache/
+.ui-runtime/
+tmp/
 # Python bytecode and local environments
 __pycache__/
 *.py[cod]
