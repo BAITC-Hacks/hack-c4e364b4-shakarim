@@ -12,11 +12,47 @@ import pandas as pd
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 import app
-from components import normalise_id
+from components import investigation_brief, normalise_id
 from graph_view import _network_canvas, load_edges
 
 
 class ContractTests(unittest.TestCase):
+    def test_invalid_edge_export_does_not_fall_back_to_another_dataset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            primary, fallback = Path(directory) / "edges.csv", Path(directory) / "fallback.csv"
+            fallback.write_text("src,dst,sum_kzt\n1,2,5000\n", encoding="utf-8")
+            for body in ("wrong,columns\n1,2\n", "src,dst,sum_kzt\n1,2,inf\n", "src,dst,sum_kzt\n1,2,-1\n"):
+                with self.subTest(body=body):
+                    primary.write_text(body, encoding="utf-8")
+                    st.cache_data.clear()
+                    edges, path = load_edges((primary, fallback))
+                    self.assertIsNone(path)
+                    self.assertTrue(edges.empty)
+                    self.assertIn("load_error", edges.attrs)
+
+    def test_missing_edges_and_valid_empty_edges_are_distinct(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "edges.csv"
+            missing, _ = load_edges((path,))
+            self.assertIn("load_error", missing.attrs)
+            path.write_text("src,dst,sum_kzt\n", encoding="utf-8")
+            st.cache_data.clear()
+            empty, loaded_path = load_edges((path,))
+            self.assertEqual(loaded_path, path)
+            self.assertNotIn("load_error", empty.attrs)
+
+    def test_brief_preserves_exact_gid_evidence_and_all_edges_with_caveats(self):
+        gid = "9223372036854775807"
+        client = pd.Series({"gid": gid, "role": "transit", "role_score": .83, "priority_score": .42,
+                            "cluster_id": "07", "evidence": "Оригинальная гипотеза команды.", "depth": 4, "is_seed": True})
+        edges = pd.DataFrame({"src": [gid] * 12, "dst": [str(i) for i in range(12)], "sum_kzt": [5000] * 12})
+        brief = investigation_brief(client, "Оригинальный приоритет.", edges, "Демонстрационный кейс")
+        self.assertIn("GID: " + gid, brief)
+        self.assertIn("Всего направленных связей: 12", brief)
+        self.assertIn(gid + " → 11", brief)
+        for text in ("0.42 / 1", "Кластер: 07", "Оригинальная гипотеза команды.", "Оригинальный приоритет.", "SEED", "DEPTH=4", "Демонстрационный кейс"):
+            self.assertIn(text, brief)
+
     def test_adjacent_large_int64_ids_remain_distinct_text_in_parquet_loader(self):
         ids = [9007199254740992, 9007199254740993]
         with tempfile.TemporaryDirectory() as directory:
@@ -96,6 +132,61 @@ class AppTests(unittest.TestCase):
                                 ("top_nodes.csv", top.iloc[::-1]), ("edges.csv", edges)]:
             table.to_csv(self.output / filename, index=False)
         return nodes, clusters, top, edges
+
+    def test_top_navigation_and_back_return_to_dashboard_without_losing_gid(self):
+        at = self.launch()
+        initial = at.session_state.traceflow_active_gid
+        at.selectbox(key="all_top_gid").set_value("902188")
+        at.button(key="all_top_open").click().run()
+        self.assertFalse(at.exception)
+        self.assertEqual(at.session_state.traceflow_active_gid, "902188")
+        self.assertEqual(at.session_state.traceflow_tab, "Dashboard")
+        next(b for b in at.button if b.label == "← Предыдущий GID").click().run()
+        self.assertFalse(at.exception)
+        self.assertEqual(at.session_state.traceflow_active_gid, initial)
+        self.assertEqual(at.session_state.traceflow_history, [])
+
+    def test_direction_filter_and_graph_navigation(self):
+        at = self.launch()
+        direction = next(r for r in at.radio if r.label == "Направление связей")
+        direction.set_value("Входящие").run()
+        self.assertFalse(at.exception)
+        peer = next(s for s in at.selectbox if s.label == "Связанный GID")
+        self.assertEqual(set(peer.options), {"902188", "903470"})
+        expected = peer.value
+        next(b for b in at.button if b.label == "Продолжить по связи →").click().run()
+        self.assertFalse(at.exception)
+        self.assertEqual(at.session_state.traceflow_active_gid, expected)
+
+    def test_empty_direction_preserves_other_observed_connections(self):
+        at = self.launch()
+        at.text_input[0].set_value("908001")
+        next(b for b in at.button if b.label == "Открыть профиль").click().run()
+        next(r for r in at.radio if r.label == "Направление связей").set_value("Входящие").run()
+        self.assertFalse(at.exception)
+        self.assertTrue(any("Всего у GID 908001: 1 связей" in i.value for i in at.info))
+        next(r for r in at.radio if r.label == "Направление связей").set_value("Исходящие").run()
+        self.assertTrue(any(s.label == "Связанный GID" for s in at.selectbox))
+
+    def test_pipeline_rank_is_not_recomputed_from_priority_score(self):
+        _, _, top, _ = self.write_results()
+        # The team may use tie-breaking or analyst-reviewed ranking.
+        top.loc[top.gid.eq("902188"), "rank"] = 40
+        top.loc[top.gid.eq("901245"), "rank"] = 50
+        top.to_csv(self.output / "top_nodes.csv", index=False)
+        at = self.launch()
+        self.assertEqual(at.session_state.traceflow_active_gid, "904311")
+        tables = " ".join(m.value for m in at.markdown if "trace-table" in m.value)
+        self.assertIn("#40", tables)
+        self.assertIn("#50", tables)
+
+    def test_broken_edges_show_unavailable_instead_of_isolated_node(self):
+        self.write_results()
+        (self.output / "edges.csv").write_text("wrong,columns\n1,2\n", encoding="utf-8")
+        at = self.launch()
+        self.assertTrue(any("src и dst" in w.value for w in at.warning))
+        self.assertFalse(any("нет переводов этого клиента" in i.value for i in at.info))
+        self.assertFalse(any(m.label == "Получено в графе" for m in at.metric))
 
     def test_default_demo_does_not_need_analytics_or_parquet(self):
         with patch("app.read_source", side_effect=AssertionError("Demo must not read real data")):

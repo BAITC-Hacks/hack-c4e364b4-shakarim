@@ -19,7 +19,10 @@ import streamlit as st
 
 from components import (
     inject_styles,
+    investigation_brief,
     normalise_id,
+    open_client,
+    return_to_previous_client,
     render_brand,
     render_client_card,
     render_cluster,
@@ -172,7 +175,7 @@ def main() -> None:
         # Attach observed collection metadata, without overriding pipeline values.
         if not demo_mode and not source_nodes.empty:
             metadata = prepare_nodes(source_nodes)
-            missing_meta = [c for c in ("depth", "is_seed") if c not in nodes]
+            missing_meta = [c for c in ("depth", "is_seed") if c not in nodes and c in metadata]
             nodes = nodes.merge(metadata[["_gid_key", *missing_meta]], on="_gid_key", how="left", validate="one_to_one")
         data_message = "Синтетические mock CSV: роли, приоритеты и связи служат только для демонстрации UI. Это не выводы по реальным клиентам." if demo_mode else ""
 
@@ -188,11 +191,15 @@ def main() -> None:
     if not top_nodes.empty:
         top_nodes = top_nodes.copy()
         top_nodes["priority_score"] = pd.to_numeric(top_nodes.priority_score, errors="coerce")
-        valid_top = top_nodes.priority_score.between(0, 100) & top_nodes.gid.map(normalise_id).isin(nodes._gid_key)
+        top_nodes["rank"] = pd.to_numeric(top_nodes["rank"], errors="coerce")
+        valid_top = (top_nodes.priority_score.between(0, 100) & top_nodes.gid.map(normalise_id).isin(nodes._gid_key)
+                     & top_nodes["rank"].gt(0) & top_nodes["rank"].mod(1).eq(0))
         if not valid_top.all():
-            optional_issues.append("top_nodes.csv: некорректные скоры или неизвестные gid")
-        top_nodes = top_nodes.loc[valid_top].drop_duplicates("gid").sort_values("priority_score", ascending=False, kind="stable")
-        top_nodes["rank"] = range(1, len(top_nodes) + 1)
+            optional_issues.append("top_nodes.csv: некорректные места, скоры или неизвестные gid")
+        if top_nodes.gid.duplicated().any() or top_nodes["rank"].duplicated().any():
+            optional_issues.append("top_nodes.csv: повторяющиеся gid или места в очереди")
+        top_nodes = top_nodes.loc[valid_top].drop_duplicates("gid").sort_values("rank", kind="stable")
+        top_nodes["rank"] = top_nodes["rank"].astype(int)
     # Display the analytics team's legacy /100 export unchanged. This is a
     # presentation scale, not a priority calculation or normalization.
     priority_maximum = 100 if (nodes.priority_score.gt(1).any() or
@@ -212,6 +219,9 @@ def main() -> None:
             st.session_state.traceflow_dataset = dataset_key
             st.session_state.traceflow_active_gid = normalise_id(default_gid)
             st.session_state.traceflow_quick_gid = normalise_id(default_gid)
+            st.session_state.traceflow_history = []
+            st.session_state.traceflow_last_gid = normalise_id(default_gid)
+            st.session_state.traceflow_tab = "Dashboard"
         if st.session_state.get("traceflow_active_gid") not in set(nodes._gid_key):
             st.session_state.traceflow_active_gid = normalise_id(default_gid)
 
@@ -229,7 +239,7 @@ def main() -> None:
             st.session_state.traceflow_quick_gid = normalise_id(default_gid) if normalise_id(default_gid) in quick_keys else normalise_id(quick_gids[0])
 
         def select_quick_client() -> None:
-            st.session_state.traceflow_active_gid = st.session_state.traceflow_quick_gid
+            open_client(st.session_state.traceflow_quick_gid)
 
         st.selectbox(
             "Клиенты из выгрузки" if raw_mode else "Быстрый переход: TOP-20",
@@ -238,6 +248,7 @@ def main() -> None:
             format_func=lambda gid: f"GID {gid}",
             on_change=select_quick_client,
         )
+        navigation_slot = st.container()
         render_role_legend()
         source_label = "Демонстрационный кейс" if demo_mode else ("Исходная выгрузка" if raw_mode else "Готовые результаты пайплайна")
         st.markdown(f'<div class="side-caption">Источник: {source_label}<br>Роли и приоритеты UI не рассчитывает.</div>', unsafe_allow_html=True)
@@ -248,6 +259,17 @@ def main() -> None:
         st.session_state.traceflow_active_gid,
     )
     st.session_state.traceflow_active_gid = normalise_id(selected["gid"])
+    current_gid = st.session_state.traceflow_active_gid
+    previous_gid = st.session_state.get("traceflow_last_gid")
+    if previous_gid and previous_gid != current_gid:
+        history = st.session_state.get("traceflow_history", [])
+        st.session_state.traceflow_history = (history + [previous_gid])[-10:]
+        st.session_state.traceflow_tab = "Dashboard"
+    st.session_state.traceflow_last_gid = current_gid
+    if st.session_state.get("traceflow_history"):
+        with navigation_slot:
+            st.button("← Предыдущий GID", on_click=return_to_previous_client, width="stretch")
+            st.caption(f"Возврат к {st.session_state.traceflow_history[-1]}")
 
     render_hero(demo_mode, len(nodes), len(edges), len(top_nodes), raw_mode=raw_mode)
     if demo_mode:
@@ -258,10 +280,18 @@ def main() -> None:
             st.warning(nodes_error + ". Отображаются только исходные данные.")
     elif clusters_error or top_error or optional_issues:
         st.warning("Часть готовых выгрузок пока недоступна или не соответствует контракту: интерфейс показывает только доступные результаты.")
+    contract_notes = []
     if priority_maximum == 100:
-        st.warning("Пайплайн передал приоритет в шкале 0–100. UI показывает его без пересчёта. Для итоговой сдачи по ТЗ аналитический экспорт должен использовать шкалу 0–1.")
+        contract_notes.append("Пайплайн передал приоритет в шкале 0–100. UI показывает его без пересчёта. Для итоговой сдачи по ТЗ аналитический экспорт должен использовать шкалу 0–1.")
     if not raw_mode and nodes.evidence.astype(str).str.len().gt(200).any():
-        st.warning("В CSV есть evidence длиннее 200 символов. UI показывает полный текст без изменений; перед сдачей команда аналитики должна сократить объяснения до лимита ТЗ.")
+        contract_notes.append("В CSV есть evidence длиннее 200 символов. UI показывает полный текст без изменений; перед сдачей команда аналитики должна сократить объяснения до лимита ТЗ.")
+    if contract_notes:
+        with st.sidebar:
+            with st.expander(f"Качество выгрузки · {len(contract_notes)} замечания"):
+                for note in contract_notes:
+                    st.warning(note)
+    if edges.attrs.get("load_error"):
+        st.warning(edges.attrs["load_error"])
     if not demo_mode and not raw_mode and len(top_nodes) < 20:
         st.warning(f"В очереди {len(top_nodes)} узлов. Для сдачи по ТЗ требуется не менее 20.")
     if not demo_mode and not raw_mode and not source_nodes.empty:
@@ -270,7 +300,7 @@ def main() -> None:
         if source_keys != result_keys:
             st.warning(f"Состав клиентов не совпадает с исходной выгрузкой: отсутствуют {len(source_keys - result_keys)}, лишних {len(result_keys - source_keys)}. Проверьте, что подключены результаты того же кейса.")
 
-    investigation, priorities, catalog, exports = st.tabs(["Dashboard", "Top Nodes", "Клиенты и кластеры", "Выгрузки и ограничения"])
+    investigation, priorities, catalog, exports = st.tabs(["Dashboard", "Top Nodes", "Клиенты и кластеры", "Выгрузки и ограничения"], key="traceflow_tab", on_change="rerun")
     with investigation:
         st.caption("1 · Найдите GID   →   2 · Проверьте роль и причину приоритета   →   3 · Проследите входящие и исходящие связи")
         profile_column, graph_column = st.columns([1.03, 1.97], gap="large")
@@ -281,21 +311,26 @@ def main() -> None:
                 if not priority_row.empty:
                     reason = priority_row.iloc[0]["why"]
             render_client_card(selected, priority_reason=reason, priority_maximum=priority_maximum)
-            render_observed(selected, edges)
+            st.caption("Роль — гипотеза для проверки. Оценка роли не является вероятностью нарушения.")
+            st.download_button("Скачать сводку по GID", investigation_brief(selected, reason, edges, source_label, priority_maximum).encode("utf-8"),
+                               file_name=f"traceflow_{current_gid}.md", mime="text/markdown", width="stretch")
+            if not edges.attrs.get("load_error"):
+                render_observed(selected, edges)
             if not raw_mode:
                 render_cluster(selected, nodes, clusters)
         with graph_column:
             render_client_connections(selected["gid"], edges, nodes, demo_mode=demo_mode)
         if not raw_mode:
-            render_top_nodes(top_nodes, limit=5, priority_maximum=priority_maximum)
+            render_top_nodes(top_nodes, limit=5, priority_maximum=priority_maximum, key="dashboard_top")
         with st.expander("Связи и история переводов", expanded=False):
-            render_connections_table(selected["gid"], edges, nodes)
+            if not edges.attrs.get("load_error"):
+                render_connections_table(selected["gid"], edges, nodes)
             if not demo_mode:
                 transactions, tx_error = read_source("transactions")
                 render_timeline(selected["gid"], transactions, tx_error)
     with priorities:
-        render_top_nodes(top_nodes, priority_maximum=priority_maximum)
-        st.caption("Выберите GID в быстром переходе слева, затем откройте Dashboard. Приоритет и объяснение читаются из CSV команды.")
+        render_top_nodes(top_nodes, priority_maximum=priority_maximum, key="all_top")
+        st.caption("В списке перехода доступны все узлы очереди. Кнопка «Открыть GID» возвращает на Dashboard. Порядок rank, приоритет и объяснение переданы аналитикой.")
     with catalog:
         render_catalog(nodes, raw_mode)
         if not clusters.empty:
