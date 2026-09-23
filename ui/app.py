@@ -6,7 +6,13 @@ Run from the repository root:
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+UI_DIR = Path(__file__).resolve().parent
+if str(UI_DIR) not in sys.path:
+    sys.path.insert(0, str(UI_DIR))
 
 import pandas as pd
 import streamlit as st
@@ -15,9 +21,7 @@ from components import inject_styles, normalise_id, render_brand, render_client_
 from graph_view import load_edges, render_client_connections
 
 
-ROOT = Path(__file__).resolve().parents[1]
-# After the analytics branch is integrated, change only this line to ROOT / "output".
-RESULTS_DIR = ROOT / "mock"
+RESULTS_DIR = ROOT / "output" if (ROOT / "output" / "nodes_roles.csv").exists() else ROOT / "mock"
 
 
 def read_result(filename: str) -> tuple[pd.DataFrame, str | None]:
