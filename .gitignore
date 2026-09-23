@@ -1,0 +1,14 @@
+# Python bytecode and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local editor and operating-system files
+.DS_Store
+.idea/
+.vscode/
+
+# Source datasets and generated metrics are supplied/generated locally.
+data/*.parquet
+output/node_metrics.csv
