@@ -229,10 +229,11 @@ def render_role_legend() -> None:
     st.markdown(f'<div style="display:grid;gap:.38rem">{badges}</div>', unsafe_allow_html=True)
 
 
-def render_client_card(client: pd.Series) -> None:
+def render_client_card(client: pd.Series, priority_reason: object = None, priority_maximum: int = 1) -> None:
     gid = escape(str(client.get("gid", "—")))
     evidence = client.get("evidence")
     evidence_text = str(evidence) if pd.notna(evidence) and str(evidence).strip() else "Объяснение пока не передано аналитическим пайплайном."
+    reason_text = str(priority_reason) if pd.notna(priority_reason) and str(priority_reason).strip() else "Отдельное обоснование приоритета не передано. Доступное объяснение роли показано выше."
     st.markdown(
         f"""
         <div class="panel">
@@ -240,10 +241,11 @@ def render_client_card(client: pd.Series) -> None:
           <div class="panel-body">
             <div class="metric-grid">
               <div class="metric"><div class="metric-label">Оценка роли</div><div class="metric-value">{format_score(client.get("role_score"))}</div></div>
-              <div class="metric"><div class="metric-label">Приоритет</div><div class="metric-value">{format_score(client.get("priority_score"))}</div></div>
+              <div class="metric"><div class="metric-label">Приоритет / {priority_maximum}</div><div class="metric-value">{format_score(client.get("priority_score"))}</div></div>
               <div class="metric"><div class="metric-label">Кластер</div><div class="metric-value">#{escape(normalise_id(client.get("cluster_id")) or "—")}</div></div>
             </div>
-            <div class="evidence"><div class="evidence-label">Почему узел важен</div>{escape(evidence_text)}</div>
+            <div class="evidence"><div class="evidence-label">Обоснование роли</div>{escape(evidence_text)}</div>
+            <div class="evidence"><div class="evidence-label">Причина приоритета</div>{escape(reason_text)}</div>
           </div>
         </div>
         """,
@@ -293,9 +295,9 @@ def render_cluster(client: pd.Series, nodes: pd.DataFrame, clusters: pd.DataFram
             )
 
 
-def render_top_nodes(top_nodes: pd.DataFrame) -> None:
+def render_top_nodes(top_nodes: pd.DataFrame, limit: int = 20, priority_maximum: int = 1) -> None:
     rows: list[str] = []
-    for fallback_rank, (_, row) in enumerate(top_nodes.head(20).iterrows(), start=1):
+    for fallback_rank, (_, row) in enumerate(top_nodes.head(limit).iterrows(), start=1):
         rank = escape(str(row.get("rank", fallback_rank)))
         gid = escape(normalise_id(row.get("gid")) or "—")
         why = escape(str(row.get("why", row.get("evidence", "—"))))
@@ -306,8 +308,8 @@ def render_top_nodes(top_nodes: pd.DataFrame) -> None:
     st.markdown(
         f"""
         <div class="panel" style="margin-top:1rem">
-          <div class="panel-head"><div><div class="panel-kicker">Очередь приоритетной проверки</div><div class="panel-title">TOP-20 узлов для аналитика</div></div><span class="quiet">TOP 20</span></div>
-          <div class="panel-body"><div class="table-wrap"><table class="trace-table"><thead><tr><th>Место</th><th>Клиент</th><th>Роль</th><th>Приоритет</th><th>Evidence</th></tr></thead><tbody>{body}</tbody></table></div></div>
+          <div class="panel-head"><div><div class="panel-kicker">Очередь приоритетной проверки</div><div class="panel-title">Top Nodes · первые {limit}</div></div><span class="quiet">Всего: {len(top_nodes)}</span></div>
+          <div class="panel-body"><div class="table-wrap"><table class="trace-table"><thead><tr><th>Место</th><th>Клиент</th><th>Роль</th><th>Приоритет / {priority_maximum}</th><th>Причина приоритета</th></tr></thead><tbody>{body}</tbody></table></div></div>
         </div>
         """,
         unsafe_allow_html=True,

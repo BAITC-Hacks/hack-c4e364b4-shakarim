@@ -34,6 +34,9 @@ def load_edges(candidates: tuple[Path, ...]) -> tuple[pd.DataFrame, Path | None]
                 )
             if {"src", "dst"}.issubset(loaded.columns):
                 loaded = loaded.copy()
+                # Never send int64 IDs from parquet to JavaScript numeric cells.
+                for column in ("src", "dst"):
+                    loaded[column] = loaded[column].map(normalise_id).astype("string")
                 # These are lookup keys only. The UI never derives scores or graph metrics.
                 loaded["_src_key"] = loaded["src"].map(normalise_id)
                 loaded["_dst_key"] = loaded["dst"].map(normalise_id)
@@ -112,7 +115,7 @@ def _network_canvas(selected_gid: object, incident: pd.DataFrame, nodes: pd.Data
     node_svg: list[str] = []
     for gid, (x, y) in position.items():
         is_selected = gid == selected
-        role = roles.get(gid, "peripheral")
+        role = roles.get(gid, "unassigned")
         color = role_color(role)
         if cluster_colors:
             cluster = cluster_map.get(gid, "—")

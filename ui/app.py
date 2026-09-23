@@ -34,57 +34,28 @@ TOP_NODE_COLUMNS = {"rank", "gid", "role", "priority_score", "why"}
 CLUSTER_COLUMNS = {"cluster_id", "n_nodes", "n_seed", "sum_kzt_internal", "top_gids", "hypothesis"}
 
 
+MOCK_DIR = ROOT / "mock"
+
+
 def demo_results() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Explicit presentation-only preview; never mixed with pipeline results."""
-    nodes = pd.DataFrame(
-        [
-            [901245, "coordinator", 0.94, 0.98, 17, "Связывает 3 ветки; через узел проходит ключевой маршрут между кластером сбора и распределения."],
-            [902188, "consolidator", 0.89, 0.92, 17, "Получает средства от 8 разных участников и концентрирует поток перед передачей дальше."],
-            [903470, "transit", 0.86, 0.87, 17, "Передаёт большую часть наблюдаемого входящего потока в следующую ветку."],
-            [904311, "distributor", 0.91, 0.90, 17, "Формирует веерный вывод на 6 получателей внутри наблюдаемого маршрута."],
-            [905624, "terminal", 0.78, 0.72, 17, "Получает средства и не имеет наблюдаемых исходящих связей в доступной части сети."],
-            [906810, "peripheral", 0.41, 0.38, 21, "Имеет ограниченное число связей и не формирует выраженную структурную роль."],
-            [907193, "transit", 0.73, 0.70, 21, "Поддерживает короткий транзитный маршрут между двумя участниками."],
-        ],
-        columns=["gid", "role", "role_score", "priority_score", "cluster_id", "evidence"],
-    )
-    clusters = pd.DataFrame(
-        [
-            [17, 5, 2, 12_480_000, "901245, 902188, 903470, 904311, 905624", "Вероятная цепочка консолидации и веерного распределения средств."],
-            [21, 2, 0, 1_230_000, "906810, 907193", "Небольшая периферийная транзитная ветка."],
-        ],
-        columns=["cluster_id", "n_nodes", "n_seed", "sum_kzt_internal", "top_gids", "hypothesis"],
-    )
-    top_nodes = pd.DataFrame(
-        [
-            [1, 901245, "coordinator", 0.98, "Соединяет 3 ветки и контролирует критическую точку маршрута."],
-            [2, 902188, "consolidator", 0.92, "Концентрирует средства от 8 участников."],
-            [3, 904311, "distributor", 0.90, "Распределяет поток на 6 получателей."],
-            [4, 903470, "transit", 0.87, "Передаёт основной наблюдаемый поток дальше."],
-            [5, 905624, "terminal", 0.72, "Конечная точка наблюдаемой ветки."],
-            [6, 907193, "transit", 0.70, "Поддерживает вспомогательную транзитную цепочку."],
-            [7, 906810, "peripheral", 0.38, "Периферийная ветка без выраженного влияния."],
-        ],
-        columns=["rank", "gid", "role", "priority_score", "why"],
-    )
-    edges = pd.DataFrame(
-        [
-            [902188, 901245, 4_840_000], [903470, 901245, 2_100_000], [901245, 904311, 5_930_000],
-            [901245, 905624, 1_420_000], [904311, 905624, 2_360_000], [904311, 903470, 1_100_000],
-        ],
-        columns=["src", "dst", "sum_kzt"],
-    )
-    return nodes, clusters, top_nodes, edges
+    """Load explicitly synthetic CSV fixtures using the production export contract."""
+    tables = []
+    for filename in ("nodes_roles.csv", "clusters.csv", "top_nodes.csv", "edges.csv"):
+        table, error = read_result(filename, MOCK_DIR)
+        if error:
+            raise ValueError(error)
+        tables.append(table)
+    return tuple(tables)
 
 
 @st.cache_data(ttl=20, show_spinner=False)
-def read_result(filename: str) -> tuple[pd.DataFrame, str | None]:
+def read_result(filename: str, directory: Path | None = None) -> tuple[pd.DataFrame, str | None]:
     """Read a ready export with a short cache; no scores are calculated here."""
-    path = RESULTS_DIR / filename
+    path = (directory if directory is not None else RESULTS_DIR) / filename
     if not path.exists():
         return pd.DataFrame(), f"Не найден {filename}"
     try:
-        return pd.read_csv(path, encoding="utf-8-sig", dtype={"gid": "string", "cluster_id": "string"}), None
+        return pd.read_csv(path, encoding="utf-8-sig", dtype={"gid": "string", "cluster_id": "string", "top_gids": "string", "src": "string", "dst": "string"}), None
     except Exception:
         return pd.DataFrame(), f"Не удалось прочитать {filename}"
 
@@ -102,10 +73,10 @@ def validate_nodes(nodes: pd.DataFrame) -> list[str]:
     for column in NODE_COLUMNS - {"gid"}:
         if nodes[column].isna().any() or nodes[column].astype(str).str.strip().eq("").any():
             issues.append(f"Есть пустые значения в {column}")
-    for column in ("role_score", "priority_score"):
+    for column, maximum in (("role_score", 1), ("priority_score", 100)):
         values = pd.to_numeric(nodes[column], errors="coerce")
-        if not values.between(0, 1).all():
-            issues.append(f"{column}: требуются числа от 0 до 1")
+        if not values.between(0, maximum).all():
+            issues.append(f"{column}: требуются числа от 0 до {maximum}")
     if nodes.evidence.astype(str).str.len().gt(200).any():
         issues.append("evidence: превышен лимит 200 символов")
     return issues
@@ -126,7 +97,12 @@ def prepare_nodes(nodes: pd.DataFrame) -> pd.DataFrame:
     """Add an in-memory lookup key only; all analytical values remain pipeline-owned."""
     prepared = nodes.copy()
     if "gid" in prepared:
-        prepared["_gid_key"] = prepared["gid"].map(normalise_id)
+        # The actual displayed column must be text too, not just the lookup key:
+        # Arrow-backed tables and dropdowns also cross the browser boundary.
+        prepared["gid"] = prepared["gid"].map(normalise_id).astype("string")
+        prepared["_gid_key"] = prepared["gid"]
+    if "is_seed" in prepared:
+        prepared["is_seed"] = prepared["is_seed"].map(lambda value: str(value).strip().lower() in {"true", "1", "1.0"})
     for column in ("role_score", "priority_score"):
         if column in prepared:
             prepared[column] = pd.to_numeric(prepared[column], errors="coerce")
@@ -147,46 +123,43 @@ def find_selected_client(nodes: pd.DataFrame, requested_gid: str, fallback_gid: 
 def main() -> None:
     st.set_page_config(page_title="TraceFlow | Financial Intelligence", page_icon="◈", layout="wide", initial_sidebar_state="expanded")
     inject_styles()
+    with st.sidebar:
+        render_brand()
+        source_mode = st.radio("Источник данных", ["Авто: output → mock", "Демо: mock CSV", "Исходные данные"], key="traceflow_source")
+        if st.button("Обновить данные", width="stretch"):
+            st.cache_data.clear()
+            st.rerun()
+        with st.expander("Подключение результатов"):
+            st.caption("Положите три CSV команды в эту папку и нажмите «Обновить данные». В режиме «Авто» они заменят mock.")
+            st.code(str(RESULTS_DIR), language=None)
+            st.caption("Другие папки задаются через TRACEFLOW_RESULTS_DIR и TRACEFLOW_DATA_DIR перед запуском.")
 
-    pipeline_nodes, nodes_error = read_result("nodes_roles.csv")
-    pipeline_clusters, clusters_error = read_result("clusters.csv")
-    pipeline_top, top_error = read_result("top_nodes.csv")
+    # Only a genuinely absent pipeline falls back to mock. Partial, empty or
+    # invalid output must remain visible as an integration issue.
+    has_output = any((RESULTS_DIR / filename).exists() for filename in ("nodes_roles.csv", "clusters.csv", "top_nodes.csv"))
+    demo_mode = source_mode == "Демо: mock CSV" or (source_mode == "Авто: output → mock" and not has_output)
+    raw_mode = source_mode == "Исходные данные"
+    active_dir = MOCK_DIR if demo_mode else RESULTS_DIR
+    pipeline_nodes, nodes_error = read_result("nodes_roles.csv", active_dir)
+    pipeline_clusters, clusters_error = read_result("clusters.csv", active_dir)
+    pipeline_top, top_error = read_result("top_nodes.csv", active_dir)
     pipeline_nodes = prepare_nodes(pipeline_nodes)
     validation_issues = validate_nodes(pipeline_nodes) if not pipeline_nodes.empty else []
-    # A design preview is opt-in. An existing-but-empty export must never be
-    # presented as an investigation result or silently replaced with test data.
-    preview_enabled = bool(st.session_state.get("traceflow_preview_enabled", False))
-    demo_mode = pipeline_nodes.empty and nodes_error is not None and preview_enabled
-    source_nodes, source_error = read_source("nodes")
-    raw_mode = pipeline_nodes.empty and nodes_error is not None and not demo_mode and not source_nodes.empty
+    source_nodes, source_error = (pd.DataFrame(), None) if demo_mode else read_source("nodes")
 
-    if demo_mode:
-        nodes, clusters, top_nodes, demo_edges = demo_results()
-        nodes = prepare_nodes(nodes)
-        data_message = "Пайплайн ещё не передал CSV. На экране показан демонстрационный кейс — это не аналитический вывод."
-    elif raw_mode:
+    if raw_mode:
+        if source_nodes.empty:
+            render_pipeline_waiting_state(source_error or "Исходная таблица клиентов пуста.")
+            return
         nodes = prepare_nodes(raw_profiles(source_nodes))
         clusters, top_nodes = pd.DataFrame(), pd.DataFrame()
-        demo_edges = pd.DataFrame(columns=["src", "dst", "sum_kzt"])
         data_message = "Открыты исходные данные. Роли, кластеры и очередь проверки появятся после подключения результатов команды."
     elif pipeline_nodes.empty:
-        with st.sidebar:
-            render_brand()
-            st.markdown('<div class="side-label">Предпросмотр интерфейса</div>', unsafe_allow_html=True)
-            st.caption("Открывает только маркированный дизайн-кейс. Он не подменяет результаты пайплайна.")
-            if st.button("Открыть дизайн-кейс", width="stretch"):
-                st.session_state.traceflow_preview_enabled = True
-                st.rerun()
-        waiting_message = (
-            "Готовая выгрузка nodes_roles.csv пока недоступна. После появления экспорта интерфейс автоматически покажет только результаты пайплайна."
-            if nodes_error
-            else "Файл nodes_roles.csv найден, но в нём пока нет результатов для отображения."
-        )
+        waiting_message = (nodes_error or "Файл nodes_roles.csv найден, но в нём пока нет результатов для отображения.")
         render_pipeline_waiting_state(waiting_message)
+        st.caption("Для независимого показа интерфейса выберите «Демо: mock CSV» в меню слева.")
         return
     elif validation_issues:
-        with st.sidebar:
-            render_brand()
         render_pipeline_waiting_state("; ".join(validation_issues))
         with st.expander("Технические детали", expanded=False):
             st.code("\n".join(validation_issues))
@@ -194,12 +167,11 @@ def main() -> None:
     else:
         nodes, clusters, top_nodes = pipeline_nodes, pipeline_clusters, pipeline_top
         # Attach observed collection metadata, without overriding pipeline values.
-        if not source_nodes.empty:
+        if not demo_mode and not source_nodes.empty:
             metadata = prepare_nodes(source_nodes)
             missing_meta = [c for c in ("depth", "is_seed") if c not in nodes]
             nodes = nodes.merge(metadata[["_gid_key", *missing_meta]], on="_gid_key", how="left", validate="one_to_one")
-        demo_edges = pd.DataFrame(columns=["src", "dst", "sum_kzt"])
-        data_message = ""
+        data_message = "Синтетические mock CSV: роли, приоритеты и связи служат только для демонстрации UI. Это не выводы по реальным клиентам." if demo_mode else ""
 
     optional_issues = [
         *validate_optional(clusters, CLUSTER_COLUMNS, "clusters.csv"),
@@ -213,24 +185,31 @@ def main() -> None:
     if not top_nodes.empty:
         top_nodes = top_nodes.copy()
         top_nodes["priority_score"] = pd.to_numeric(top_nodes.priority_score, errors="coerce")
-        valid_top = top_nodes.priority_score.between(0, 1) & top_nodes.gid.map(normalise_id).isin(nodes._gid_key)
+        valid_top = top_nodes.priority_score.between(0, 100) & top_nodes.gid.map(normalise_id).isin(nodes._gid_key)
         if not valid_top.all():
             optional_issues.append("top_nodes.csv: некорректные скоры или неизвестные gid")
         top_nodes = top_nodes.loc[valid_top].drop_duplicates("gid").sort_values("priority_score", ascending=False, kind="stable")
         top_nodes["rank"] = range(1, len(top_nodes) + 1)
+    # Display the analytics team's legacy /100 export unchanged. This is a
+    # presentation scale, not a priority calculation or normalization.
+    priority_maximum = 100 if (nodes.priority_score.gt(1).any() or
+        (not top_nodes.empty and (top_nodes.priority_score.gt(1).any() or top_nodes.why.astype(str).str.contains("/100", regex=False).any()))) else 1
 
-    edge_candidates = [
+    edge_candidates = [MOCK_DIR / "edges.csv"] if demo_mode else ([DATA_DIR / "edges.parquet"] if raw_mode else [
         RESULTS_DIR / "edges.parquet", RESULTS_DIR / "edges.csv",
         DATA_DIR / "edges.parquet",
-    ]
-    loaded_edges, edge_path = load_edges(tuple(edge_candidates))
-    edges = demo_edges if demo_mode else loaded_edges
+    ])
+    edges, edge_path = load_edges(tuple(edge_candidates))
 
     with st.sidebar:
-        render_brand()
         st.markdown('<div class="side-label">Управление расследованием</div>', unsafe_allow_html=True)
         default_gid = top_nodes.iloc[0]["gid"] if not top_nodes.empty and "gid" in top_nodes else nodes.iloc[0]["gid"]
-        if "traceflow_active_gid" not in st.session_state:
+        dataset_key = (source_mode, demo_mode, str(active_dir))
+        if st.session_state.get("traceflow_dataset") != dataset_key:
+            st.session_state.traceflow_dataset = dataset_key
+            st.session_state.traceflow_active_gid = normalise_id(default_gid)
+            st.session_state.traceflow_quick_gid = normalise_id(default_gid)
+        if st.session_state.get("traceflow_active_gid") not in set(nodes._gid_key):
             st.session_state.traceflow_active_gid = normalise_id(default_gid)
 
         with st.form("gid-search", clear_on_submit=True):
@@ -256,25 +235,9 @@ def main() -> None:
             format_func=lambda gid: f"GID {gid}",
             on_change=select_quick_client,
         )
-        if st.button("Обновить данные", width="stretch"):
-            st.cache_data.clear()
-            st.rerun()
-        if demo_mode and st.button("Закрыть дизайн-кейс", width="stretch"):
-            st.session_state.traceflow_preview_enabled = False
-            st.rerun()
-        if raw_mode:
-            with st.expander("Предпросмотр дизайна"):
-                st.caption("Вымышленный пример, отдельно от исходных данных.")
-                if st.button("Открыть дизайн-кейс", width="stretch"):
-                    st.session_state.traceflow_preview_enabled = True
-                    st.rerun()
         render_role_legend()
         source_label = "Демонстрационный кейс" if demo_mode else ("Исходная выгрузка" if raw_mode else "Готовые результаты пайплайна")
         st.markdown(f'<div class="side-caption">Источник: {source_label}<br>Роли и приоритеты UI не рассчитывает.</div>', unsafe_allow_html=True)
-        with st.expander("Подключение результатов"):
-            st.caption("Положите три CSV команды в эту папку и нажмите «Обновить данные».")
-            st.code(str(RESULTS_DIR), language=None)
-            st.caption("Другие папки задаются через TRACEFLOW_RESULTS_DIR и TRACEFLOW_DATA_DIR перед запуском.")
 
     selected = find_selected_client(
         nodes,
@@ -292,6 +255,8 @@ def main() -> None:
             st.warning(nodes_error + ". Отображаются только исходные данные.")
     elif clusters_error or top_error or optional_issues:
         st.warning("Часть готовых выгрузок пока недоступна или не соответствует контракту: интерфейс показывает только доступные результаты.")
+    if priority_maximum == 100:
+        st.warning("Пайплайн передал приоритет в шкале 0–100. UI показывает его без пересчёта. Для итоговой сдачи по ТЗ аналитический экспорт должен использовать шкалу 0–1.")
     if not demo_mode and not raw_mode and len(top_nodes) < 20:
         st.warning(f"В очереди {len(top_nodes)} узлов. Для сдачи по ТЗ требуется не менее 20.")
     if not demo_mode and not raw_mode and not source_nodes.empty:
@@ -300,23 +265,32 @@ def main() -> None:
         if source_keys != result_keys:
             st.warning(f"Состав клиентов не совпадает с исходной выгрузкой: отсутствуют {len(source_keys - result_keys)}, лишних {len(result_keys - source_keys)}. Проверьте, что подключены результаты того же кейса.")
 
-    investigation, catalog, exports = st.tabs(["Расследование", "Клиенты и кластеры", "Выгрузки и ограничения"])
+    investigation, priorities, catalog, exports = st.tabs(["Dashboard", "Top Nodes", "Клиенты и кластеры", "Выгрузки и ограничения"])
     with investigation:
+        st.caption("1 · Найдите GID   →   2 · Проверьте роль и причину приоритета   →   3 · Проследите входящие и исходящие связи")
         profile_column, graph_column = st.columns([1.03, 1.97], gap="large")
         with profile_column:
-            render_client_card(selected)
+            reason = selected.get("priority_reason", selected.get("priority_evidence"))
+            if not top_nodes.empty:
+                priority_row = top_nodes.loc[top_nodes.gid.map(normalise_id).eq(normalise_id(selected.gid))]
+                if not priority_row.empty:
+                    reason = priority_row.iloc[0]["why"]
+            render_client_card(selected, priority_reason=reason, priority_maximum=priority_maximum)
             render_observed(selected, edges)
             if not raw_mode:
                 render_cluster(selected, nodes, clusters)
         with graph_column:
             render_client_connections(selected["gid"], edges, nodes, demo_mode=demo_mode)
-        with st.expander("Связи и история переводов", expanded=True):
+        if not raw_mode:
+            render_top_nodes(top_nodes, limit=5, priority_maximum=priority_maximum)
+        with st.expander("Связи и история переводов", expanded=False):
             render_connections_table(selected["gid"], edges, nodes)
             if not demo_mode:
                 transactions, tx_error = read_source("transactions")
                 render_timeline(selected["gid"], transactions, tx_error)
-        if not raw_mode:
-            render_top_nodes(top_nodes)
+    with priorities:
+        render_top_nodes(top_nodes, priority_maximum=priority_maximum)
+        st.caption("Выберите GID в быстром переходе слева, затем откройте Dashboard. Приоритет и объяснение читаются из CSV команды.")
     with catalog:
         render_catalog(nodes, raw_mode)
         if not clusters.empty:
