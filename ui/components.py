@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from html import escape
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import pandas as pd
@@ -18,6 +19,7 @@ ROLE_COLORS = {
     "peripheral": "#8090AB",
 }
 ROLE_LABELS = {
+    "unassigned": "Роль не рассчитана",
     "consolidator": "Консолидатор",
     "transit": "Транзит",
     "distributor": "Распределитель",
@@ -35,8 +37,8 @@ def normalise_id(value: Any) -> str:
     text = str(value).strip()
     if text.endswith(".0"):
         try:
-            return str(int(float(text)))
-        except ValueError:
+            return str(int(Decimal(text)))
+        except (InvalidOperation, ValueError, OverflowError):
             pass
     return text
 
@@ -106,6 +108,9 @@ def inject_styles() -> None:
         .side-label { color:#7C8AA6; font-size:.65rem; font-weight:800; letter-spacing:.15em; text-transform:uppercase; margin:1.2rem 0 .48rem; }
         .side-caption { color:#687793; font-size:.75rem; line-height:1.48; margin-top:1.5rem; }
         .hero { display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; padding:1.25rem 0 1.35rem; }
+        .hero { flex-wrap:wrap; }
+        [data-testid="stMetricValue"] { font-size:1.22rem; }
+        [data-testid="stMetricValue"] > div { white-space:normal; overflow-wrap:anywhere; }
         .hero-kicker { color:#8299FF; font-size:.67rem; font-weight:800; letter-spacing:.18em; text-transform:uppercase; margin-bottom:.48rem; }
         .hero-title { color:#F5F7FF; font-size:2.15rem; font-weight:750; line-height:1.06; letter-spacing:-.06em; }
         .hero-copy { color:#94A1B9; font-size:.9rem; line-height:1.5; margin-top:.55rem; }
@@ -124,6 +129,8 @@ def inject_styles() -> None:
         .panel-title { color:#F2F5FF; font-size:1.03rem; font-weight:720; letter-spacing:-.025em; margin-top:.22rem; }
         .panel-body { padding:1rem 1.12rem 1.12rem; }
         .subject-id { color:#F5F7FF; font-size:1.52rem; font-weight:760; letter-spacing:-.055em; margin-top:.35rem; }
+        .subject-id { font-size:1.25rem; overflow-wrap:anywhere; }
+        .panel-head { flex-wrap:wrap; gap:.55rem; }
         .role-badge { display:inline-flex; align-items:center; gap:.42rem; color:#EAF0FF; border:1px solid color-mix(in srgb, var(--role) 48%, transparent); background:color-mix(in srgb, var(--role) 12%, transparent); border-radius:999px; padding:.35rem .58rem; font-size:.73rem; font-weight:720; }
         .role-badge i { width:7px; height:7px; background:var(--role); border-radius:50%; box-shadow:0 0 12px var(--role); }
         .metric-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:.55rem; margin-top:1rem; }
@@ -182,9 +189,13 @@ def render_brand() -> None:
     )
 
 
-def render_hero(demo_mode: bool, n_nodes: int, n_edges: int, n_top: int) -> None:
+def render_hero(demo_mode: bool, n_nodes: int, n_edges: int, n_top: int, raw_mode: bool = False) -> None:
     mode_class = "demo-pill" if demo_mode else ""
     mode_text = "ДЕМО-КЕЙС" if demo_mode else "ДАННЫЕ ЗАГРУЖЕНЫ"
+    if raw_mode:
+        mode_text = "ОБЗОР ИСХОДНЫХ ДАННЫХ"
+    result_label = "Ожидает расчёта" if raw_mode else "Проверяемый"
+    result_note = "роли ещё не переданы" if raw_mode else "выводы с evidence"
     nodes_label = f"{n_nodes:,}".replace(",", " ")
     edges_label = f"{n_edges:,}".replace(",", " ")
     top_label = f"{n_top:,}".replace(",", " ")
@@ -198,7 +209,7 @@ def render_hero(demo_mode: bool, n_nodes: int, n_edges: int, n_top: int) -> None
           <div class="stat-tile"><div class="stat-name">Клиенты в контуре</div><div class="stat-value">{nodes_label}</div><div class="stat-note">в текущем кейсе</div></div>
           <div class="stat-tile"><div class="stat-name">Наблюдаемые связи</div><div class="stat-value">{edges_label}</div><div class="stat-note">направленных переводов</div></div>
           <div class="stat-tile"><div class="stat-name">Очередь проверки</div><div class="stat-value">{top_label}</div><div class="stat-note">приоритетных узлов</div></div>
-          <div class="stat-tile"><div class="stat-name">Режим решения</div><div class="stat-value">Проверяемый</div><div class="stat-note">выводы с evidence</div></div>
+          <div class="stat-tile"><div class="stat-name">Режим решения</div><div class="stat-value">{result_label}</div><div class="stat-note">{result_note}</div></div>
         </div>
         """,
         unsafe_allow_html=True,

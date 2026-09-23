@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from base64 import b64encode
 from html import escape
-from math import cos, pi, sin
+from math import cos, pi, sin, hypot, log1p
 from pathlib import Path
 
 import pandas as pd
@@ -22,20 +22,27 @@ def load_edges(candidates: tuple[Path, ...]) -> tuple[pd.DataFrame, Path | None]
         try:
             if path.suffix.lower() == ".parquet":
                 try:
-                    loaded = pd.read_parquet(path, columns=["src", "dst", "sum_kzt"])
+                    loaded = pd.read_parquet(path)
                 except Exception:
                     loaded = pd.read_parquet(path, columns=["src", "dst"])
             else:
                 loaded = pd.read_csv(
                     path,
                     encoding="utf-8-sig",
-                    usecols=lambda column: column in {"src", "dst", "sum_kzt"},
+                    usecols=lambda column: column in {"src", "dst", "sum_kzt", "n_tx"},
+                    dtype={"src": "string", "dst": "string"},
                 )
             if {"src", "dst"}.issubset(loaded.columns):
                 loaded = loaded.copy()
                 # These are lookup keys only. The UI never derives scores or graph metrics.
                 loaded["_src_key"] = loaded["src"].map(normalise_id)
                 loaded["_dst_key"] = loaded["dst"].map(normalise_id)
+                if loaded[["_src_key", "_dst_key"]].eq("").any().any():
+                    continue
+                if "sum_kzt" in loaded:
+                    loaded["sum_kzt"] = pd.to_numeric(loaded["sum_kzt"], errors="coerce")
+                    if loaded.sum_kzt.isna().any() or (loaded.sum_kzt < 0).any():
+                        continue
                 return loaded, path
         except Exception:
             continue
@@ -54,7 +61,7 @@ def _safe(value: object) -> str:
     return escape(str(value), quote=True)
 
 
-def _network_canvas(selected_gid: object, incident: pd.DataFrame, nodes: pd.DataFrame, demo_mode: bool) -> str:
+def _network_canvas(selected_gid: object, incident: pd.DataFrame, nodes: pd.DataFrame, demo_mode: bool, cluster_colors: bool = False) -> str:
     selected = normalise_id(selected_gid)
     neighbors: list[str] = []
     for row in incident.itertuples(index=False):
@@ -63,6 +70,9 @@ def _network_canvas(selected_gid: object, incident: pd.DataFrame, nodes: pd.Data
                 neighbors.append(gid)
     neighbors = neighbors[:10]
     roles = _roles(nodes, {selected, *neighbors})
+    cluster_map = dict(zip(nodes.gid.map(normalise_id), nodes.cluster_id.map(normalise_id))) if "cluster_id" in nodes else {}
+    cluster_palette = {cluster: f"hsl({index * 137.508 % 360:.1f} 70% 65%)"
+                       for index, cluster in enumerate(sorted(set(cluster_map.values()) - {"—", ""}))}
 
     cx, cy = 510, 266
     position = {selected: (cx, cy)}
@@ -78,13 +88,24 @@ def _network_canvas(selected_gid: object, incident: pd.DataFrame, nodes: pd.Data
             continue
         x1, y1 = position[src]
         x2, y2 = position[dst]
+        distance = hypot(x2 - x1, y2 - y1)
+        if distance:
+            dx, dy = (x2 - x1) / distance, (y2 - y1) / distance
+            start_radius = 47 if src == selected else 33
+            end_radius = 51 if dst == selected else 37
+            x1, y1 = x1 + dx * start_radius, y1 + dy * start_radius
+            x2, y2 = x2 - dx * end_radius, y2 - dy * end_radius
         control_x = (x1 + x2) / 2 + (35 if y1 < y2 else -35)
         control_y = (y1 + y2) / 2 - 24
         amount = getattr(row, "sum_kzt", None)
         amount_label = format_money(amount) if amount is not None else "перевод"
+        path = f"M {x1:.1f} {y1:.1f} Q {control_x:.1f} {control_y:.1f} {x2:.1f} {y2:.1f}"
+        if src == dst:
+            path = f"M {x1 - 25:.1f} {y1 - 30:.1f} C {x1 - 100:.1f} {y1 - 120:.1f} {x1 + 100:.1f} {y1 - 120:.1f} {x1 + 30:.1f} {y1 - 35:.1f}"
+        width = 1.3 + min(2.0, log1p(float(amount or 0)) / 8)
         edge_svg.append(
-            f'<g><path id="flow-{index}" class="flow-line" d="M {x1:.1f} {y1:.1f} Q {control_x:.1f} {control_y:.1f} {x2:.1f} {y2:.1f}" marker-end="url(#arrow)"/>'
-            f'<circle r="3.5" class="flow-particle"><animateMotion dur="{2.4 + index * .18:.1f}s" repeatCount="indefinite" path="M {x1:.1f} {y1:.1f} Q {control_x:.1f} {control_y:.1f} {x2:.1f} {y2:.1f}"/></circle>'
+            f'<g><path id="flow-{index}" class="flow-line" style="stroke-width:{width:.1f}" d="{path}" marker-end="url(#arrow)"/>'
+            f'<circle r="3.5" class="flow-particle"><animateMotion dur="{2.4 + index * .18:.1f}s" repeatCount="indefinite" path="{path}"/></circle>'
             f'<title>{_safe(src)} -&gt; {_safe(dst)}: {_safe(amount_label)}</title></g>'
         )
 
@@ -93,17 +114,23 @@ def _network_canvas(selected_gid: object, incident: pd.DataFrame, nodes: pd.Data
         is_selected = gid == selected
         role = roles.get(gid, "peripheral")
         color = role_color(role)
+        if cluster_colors:
+            cluster = cluster_map.get(gid, "—")
+            color = cluster_palette.get(cluster, "#8090AB")
         label = "ВЫБРАН" if is_selected else role_label(role).upper()
+        if cluster_colors and not is_selected:
+            label = f"КЛАСТЕР {cluster_map.get(gid, '—')}"
         radius = 43 if is_selected else 29
         node_class = "network-node selected" if is_selected else "network-node"
         node_svg.append(
             f'<g class="{node_class}" transform="translate({x:.1f},{y:.1f})">'
+            f'<title>GID {_safe(gid)} · {_safe(role_label(role))} · кластер {_safe(cluster_map.get(gid, "—"))}</title>'
             f'<circle class="node-halo" r="{radius + 13}" fill="{color}"/><circle class="node-core" r="{radius}" fill="#10192A" stroke="{color}" stroke-width="2"/>'
             f'<circle r="5" fill="{color}"/><text class="node-id" y="{radius + 18}">{_safe(gid)}</text><text class="node-role" y="{radius + 31}">{_safe(label)}</text></g>'
         )
 
     mode = "ДЕМО-СЕТЬ" if demo_mode else "НАБЛЮДАЕМЫЕ СВЯЗИ"
-    return f"""
+    document = f"""
     <!doctype html><html><head><style>
       html,body {{ margin:0; background:transparent; overflow:hidden; font-family:Inter,Arial,sans-serif; }}
       .graph-shell {{ overflow:hidden; border:1px solid #283750; border-radius:18px; background:#0D1320; }}
@@ -115,6 +142,10 @@ def _network_canvas(selected_gid: object, incident: pd.DataFrame, nodes: pd.Data
       .grid {{ position:absolute; inset:0; opacity:.27; background-image:linear-gradient(#43516d 1px,transparent 1px),linear-gradient(90deg,#43516d 1px,transparent 1px); background-size:38px 38px; mask-image:radial-gradient(ellipse at center,black,transparent 78%); }}
       .topline {{ position:absolute; z-index:2; left:18px; top:15px; color:#8493AE; font-size:10px; letter-spacing:1.8px; font-weight:800; }}
       .legend {{ position:absolute; z-index:2; right:18px; top:14px; color:#8392AB; font-size:10px; }}
+      .zoom-tools {{ position:absolute; z-index:3; bottom:12px; right:14px; display:flex; gap:6px; }}
+      button {{ background:#19253c; border:1px solid #3c5076; color:#dce6ff; border-radius:7px; padding:7px 12px; cursor:pointer; }}
+      button:focus-visible {{ outline:2px solid #9cb0ff; }}
+      svg {{ touch-action:none; cursor:grab; }}
       svg {{ position:absolute; inset:0; width:100%; height:100%; }}
       .flow-line {{ fill:none; stroke:#6F8DFF; stroke-width:1.4; opacity:.68; stroke-dasharray:4 7; animation:flow 2.8s linear infinite; }}
       .flow-particle {{ fill:#B6C8FF; filter:drop-shadow(0 0 7px #7a99ff); }}
@@ -127,8 +158,27 @@ def _network_canvas(selected_gid: object, incident: pd.DataFrame, nodes: pd.Data
       @media (prefers-reduced-motion: reduce) {{ .flow-line,.node-halo {{ animation:none !important; }} .flow-particle {{ display:none; }} }}
       @media(max-width:680px) {{ .graph-meta {{ display:none; }} .legend {{ display:none; }} }}
     </style></head><body><div class="graph-shell"><div class="graph-head"><div><div class="graph-kicker">ДОКАЗАТЕЛЬСТВА СВЯЗЕЙ</div><div class="graph-title">Контур переводов · GID {_safe(selected)}</div></div><div class="graph-meta">НАПРАВЛЕНИЕ ВКЛЮЧЕНО</div></div><div class="canvas"><div class="grid"></div><div class="topline">{mode} &middot; {len(incident)} СВЯЗЕЙ</div><div class="legend">&#9679; направление потока &nbsp; &#9671; выбранный клиент</div>
-    <svg viewBox="0 0 1020 520" preserveAspectRatio="xMidYMid meet" aria-label="Связи выбранного клиента"><defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#6F8DFF"/></marker></defs>{''.join(edge_svg)}{''.join(node_svg)}</svg></div></div></body></html>
+    <svg id="network" viewBox="0 0 1020 520" preserveAspectRatio="xMidYMid meet" aria-label="Связи выбранного клиента"><defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#6F8DFF"/></marker></defs>{''.join(edge_svg)}{''.join(node_svg)}</svg><div class="zoom-tools"><button id="zoom-in" aria-label="Приблизить">+</button><button id="zoom-out" aria-label="Отдалить">−</button><button id="zoom-reset">Сброс</button></div></div></div>
     """
+    return document + """<script>
+    const svg = document.getElementById('network');
+    let box = [0, 0, 1020, 520], start;
+    const draw = () => svg.setAttribute('viewBox', box.join(' '));
+    const zoom = factor => {
+      const width = Math.max(255, Math.min(2040, box[2] * factor));
+      const height = width * 520 / 1020;
+      box = [box[0] + (box[2]-width)/2, box[1] + (box[3]-height)/2, width, height]; draw();
+    };
+    document.getElementById('zoom-in').onclick = () => zoom(.8);
+    document.getElementById('zoom-out').onclick = () => zoom(1.25);
+    document.getElementById('zoom-reset').onclick = () => {box = [0,0,1020,520]; draw();};
+    svg.onpointerdown = e => {start = [e.clientX,e.clientY,...box]; svg.setPointerCapture(e.pointerId);};
+    svg.onpointermove = e => {if(!start) return;
+      const scale = Math.max(start[4]/svg.clientWidth, start[5]/svg.clientHeight);
+      box[0] = start[2]-(e.clientX-start[0])*scale;
+      box[1] = start[3]-(e.clientY-start[1])*scale; draw();};
+    svg.onpointerup = svg.onpointercancel = () => {start = null;};
+    </script></body></html>"""
 
 
 def _render_graph_empty(message: str) -> None:
@@ -163,7 +213,23 @@ def render_client_connections(selected_gid: object, edges: pd.DataFrame, nodes: 
     if "sum_kzt" in incident.columns:
         incident["_sort"] = pd.to_numeric(incident["sum_kzt"], errors="coerce")
         incident = incident.sort_values("_sort", ascending=False, na_position="last")
-    incident = incident.head(12)
-    document = _network_canvas(selected_gid, incident, nodes, demo_mode)
+    total = len(incident)
+    all_incident = incident
+    peers = []
+    for row in incident.itertuples():
+        peer = normalise_id(row.dst) if normalise_id(row.src) == selected else normalise_id(row.src)
+        if peer != selected and peer not in peers:
+            peers.append(peer)
+    page_size = 10
+    page_count = max(1, (len(peers) + page_size - 1) // page_size)
+    controls = st.columns(2)
+    with controls[0]:
+        color_mode = st.radio("Подсветка", ["Роли", "Кластеры"], horizontal=True)
+    with controls[1]:
+        page = st.selectbox("Группа связей", range(page_count), format_func=lambda p: f"{p + 1} / {page_count}", key=f"graph_page_{selected}")
+    shown = {selected, *peers[page * page_size:(page + 1) * page_size]}
+    incident = all_incident.loc[all_incident.src.map(normalise_id).isin(shown) & all_incident.dst.map(normalise_id).isin(shown)]
+    document = _network_canvas(selected_gid, incident, nodes, demo_mode, cluster_colors=color_mode == "Кластеры")
     data_url = "data:text/html;charset=utf-8;base64," + b64encode(document.encode("utf-8")).decode("ascii")
     st.iframe(data_url, height=578)
+    st.caption(f"Показано {len(incident)} из {total} связей · до 10 соседей на странице, по сумме переводов. Стрелка указывает получателя. Схему можно перемещать и масштабировать.")
