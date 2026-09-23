@@ -23,5 +23,5 @@ def export(nodes, clusters, output_dir):
     ranked = sorted(nodes, key=lambda row: (-float(row["priority_score"]), str(row["gid"])))[:max(20, min(100, len(nodes)))]
     write_csv(output_dir / "top_nodes.csv", ["rank", "gid", "role", "priority_score", "why"],
               [dict(rank=i, gid=row["gid"], role=row["role"], priority_score=row["priority_score"],
-                    why=f"Приоритет {row['priority_score']}/100. {row['evidence']}")
+                    why=f"Приоритет {float(row['priority_score']):.3f}/1. {row['evidence']}")
                for i, row in enumerate(ranked, 1)])

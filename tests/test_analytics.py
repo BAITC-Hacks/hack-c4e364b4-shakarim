@@ -71,11 +71,11 @@ class RoleClassificationTests(unittest.TestCase):
 
 
 class PriorityTests(unittest.TestCase):
-    def test_seed_adds_ten_points_and_score_is_bounded(self):
+    def test_seed_adds_one_tenth_and_score_is_bounded(self):
         metrics = {"in_amount": 500_000, "out_amount": 250_000, "unique_senders": 4, "unique_receivers": 5}
         without_seed = priority_score(metrics)
         with_seed = priority_score({**metrics, "is_seed": "true"})
-        self.assertEqual(with_seed - without_seed, 10)
+        self.assertAlmostEqual(with_seed - without_seed, .1, places=3)
         self.assertGreaterEqual(with_seed, 0)
         self.assertLessEqual(with_seed, 100)
 

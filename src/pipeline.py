@@ -76,7 +76,7 @@ def analyze(rows):
                          "top_gids": ";".join(row["gid"] for row in top), "hypothesis": hypothesis})
     clean_nodes = [{k: v for k, v in row.items() if not k.startswith("_")} for row in node_results]
     for row in clean_nodes:
-        row["priority_score"] = round(float(row["priority_score"]), 2)
+        row["priority_score"] = round(float(row["priority_score"]), 3)
     return clean_nodes, clusters
 
 
