@@ -138,6 +138,9 @@ def render_top_nodes(top_nodes: pd.DataFrame) -> None:
 
     visible = top_nodes.head(20).copy()
     wanted = [column for column in ["rank", "gid", "role", "priority_score", "why"] if column in visible]
+    if not wanted:
+        st.markdown('<div class="tf-empty">В top_nodes.csv нет отображаемых колонок.</div>', unsafe_allow_html=True)
+        return
     st.dataframe(visible[wanted], hide_index=True, use_container_width=True)
 
 

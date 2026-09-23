@@ -18,6 +18,7 @@ from graph_view import load_edges, render_client_connections
 ROOT = Path(__file__).resolve().parents[1]
 # After the analytics branch is integrated, change only this line to ROOT / "output".
 RESULTS_DIR = ROOT / "mock"
+NODE_COLUMNS = {"gid", "role", "role_score", "priority_score", "cluster_id", "evidence"}
 
 
 def read_result(filename: str) -> tuple[pd.DataFrame, str | None]:
@@ -44,6 +45,34 @@ def find_selected_client(nodes: pd.DataFrame, requested_gid: str, fallback_gid: 
     return matched.iloc[0] if not matched.empty else pd.Series(dtype=object)
 
 
+def validate_nodes(nodes: pd.DataFrame) -> list[str]:
+    """Return actionable contract errors without mutating analytical output."""
+    issues: list[str] = []
+    missing = sorted(NODE_COLUMNS - set(nodes.columns))
+    if missing:
+        return [f"отсутствуют колонки: {', '.join(missing)}"]
+
+    keys = nodes["gid"].map(normalise_id)
+    if keys.eq("").any():
+        issues.append(f"{int(keys.eq('').sum())} строк имеют пустой gid")
+    duplicate_count = int(keys[keys.ne("")].duplicated().sum())
+    if duplicate_count:
+        issues.append(f"найдены дублирующиеся gid ({duplicate_count} повторов)")
+    for column in ["role", "role_score", "priority_score", "cluster_id", "evidence"]:
+        missing_values = int(nodes[column].isna().sum())
+        if missing_values:
+            issues.append(f"{column}: {missing_values} пустых значений")
+    return issues
+
+
+def validate_optional_table(frame: pd.DataFrame, filename: str, columns: set[str]) -> str | None:
+    """Validate optional result tables while keeping the client screen usable."""
+    if frame.empty:
+        return f"{filename} пуст — соответствующий раздел будет показан без данных."
+    missing = sorted(columns - set(frame.columns))
+    return f"{filename}: отсутствуют колонки {', '.join(missing)}." if missing else None
+
+
 def main() -> None:
     st.set_page_config(page_title="TraceFlow | Аналитик", page_icon="◈", layout="wide")
     inject_styles()
@@ -61,16 +90,16 @@ def main() -> None:
     if nodes.empty:
         st.error(nodes_error or f"Файл nodes_roles.csv пуст: {RESULTS_DIR}")
         st.stop()
-    if clusters_error:
-        st.warning(clusters_error)
-    if top_nodes_error:
-        st.warning(top_nodes_error)
-
-    required = {"gid", "role", "role_score", "priority_score", "cluster_id", "evidence"}
-    missing = sorted(required - set(nodes.columns))
-    if missing:
-        st.error(f"nodes_roles.csv не соответствует контракту: отсутствуют {', '.join(missing)}.")
+    node_issues = validate_nodes(nodes)
+    if node_issues:
+        st.error("nodes_roles.csv не прошёл проверку: " + "; ".join(node_issues))
         st.stop()
+    cluster_issue = clusters_error or validate_optional_table(clusters, "clusters.csv", {"cluster_id"})
+    top_issue = top_nodes_error or validate_optional_table(top_nodes, "top_nodes.csv", {"gid", "priority_score"})
+    if cluster_issue:
+        st.warning(cluster_issue)
+    if top_issue:
+        st.warning(top_issue)
 
     edge_candidates = [
         RESULTS_DIR / "edges.parquet",
