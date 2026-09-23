@@ -26,10 +26,11 @@ def louvain(nodes, edges):
             weights_by_comm = defaultdict(float)
             for neighbor, weight in graph[node].items():
                 weights_by_comm[community[neighbor]] += weight
+            community[node] = -1
             totals = defaultdict(float)
             for member, comm in community.items():
-                totals[comm] += degree[member]
-            community[node] = -1
+                if comm >= 0:
+                    totals[comm] += degree[member]
             best, best_gain = old, 0.0
             for candidate in sorted(weights_by_comm):
                 gain = weights_by_comm[candidate] - degree[node] * totals[candidate] / m2

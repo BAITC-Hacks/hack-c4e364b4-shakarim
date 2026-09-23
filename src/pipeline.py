@@ -12,14 +12,13 @@ import sys
 
 from clustering import louvain
 from export import export
-from priority import priority_reason, priority_score
+from priority import priority_score
 from roles import classify, is_seed, key_name, number
 
 
 GID_NAMES = {"gid", "node_id", "node", "account_id"}
 SOURCE_NAMES = {"source", "source_gid", "src", "from_gid", "sender_gid", "from"}
 TARGET_NAMES = {"target", "target_gid", "dst", "to_gid", "receiver_gid", "to"}
-AMOUNT_NAMES = {"amount", "amount_kzt", "sum_kzt", "transaction_amount", "value", "kzt"}
 
 
 def find_value(row, names):
@@ -91,8 +90,12 @@ def analyze(rows):
         roles = Counter(row["role"] for row in members)
         dominant, count = roles.most_common(1)[0]
         seed_count = sum(row["_seed"] for row in members)
-        hypothesis = (f"Преобладает роль {dominant} ({count}/{len(members)} узлов); "
-                      f"обнаружено seed-узлов: {seed_count}.")
+        if edge_rows:
+            hypothesis = (f"Преобладает роль {dominant} ({count}/{len(members)} узлов); "
+                          f"обнаружено seed-узлов: {seed_count}.")
+        else:
+            hypothesis = (f"Связи отсутствуют во входном CSV; сетевой Louvain недоступен. "
+                          f"Преобладает роль {dominant} ({count}/{len(members)} узлов); seed: {seed_count}.")
         top = sorted(members, key=lambda row: (-row["priority_score"], row["gid"]))[:5]
         clusters.append({"cluster_id": cluster_id, "n_nodes": len(members), "n_seed": seed_count,
                          "sum_kzt_internal": round(internal[cluster_id], 2),
@@ -112,7 +115,7 @@ def main(argv=None):
     if args.input:
         input_path = args.input if args.input.is_absolute() else root / args.input
     else:
-        candidates = [root / "mock/node_metrics.csv", root / "output/node_metrics.csv"]
+        candidates = [root / "output/node_metrics.csv", root / "mock/node_metrics.csv"]
         input_path = next((p for p in candidates if p.is_file()), candidates[0])
     output_dir = args.output_dir if args.output_dir.is_absolute() else root / args.output_dir
     try:
