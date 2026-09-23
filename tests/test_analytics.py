@@ -17,13 +17,19 @@ sys.path.insert(0, str(ROOT / "src"))
 from clustering import louvain
 from pipeline import analyze, main
 from priority import priority_score
-from roles import classify
+from roles import ROLE_RULES, classify
 
 
 class RoleClassificationTests(unittest.TestCase):
+    def test_role_rules_are_documented_in_evaluation_order(self):
+        self.assertEqual(len(ROLE_RULES), 7)
+        self.assertTrue(ROLE_RULES[0].startswith("peripheral"))
+        self.assertTrue(ROLE_RULES[1].startswith("terminal"))
+        self.assertTrue(ROLE_RULES[2].startswith("coordinator"))
+
     def test_assigns_each_of_six_roles_for_explainable_examples(self):
         examples = {
-            "consolidator": {"in_amount": 10_000, "out_amount": 500, "unique_senders": 11, "unique_receivers": 2},
+            "consolidator": {"in_amount": 10_000, "out_amount": 3_000, "unique_senders": 11, "unique_receivers": 2},
             "distributor": {"in_amount": 500, "out_amount": 10_000, "unique_senders": 2, "unique_receivers": 11},
             "transit": {"in_amount": 10_000, "out_amount": 9_200, "unique_senders": 4, "unique_receivers": 4},
             "terminal": {"in_amount": 10_000, "out_amount": 100, "unique_senders": 5, "unique_receivers": 0, "depth": 2, "out_degree": 0},
@@ -37,6 +43,21 @@ class RoleClassificationTests(unittest.TestCase):
                 self.assertGreaterEqual(score, 0.05)
                 self.assertLessEqual(score, 1.0)
                 self.assertTrue(evidence)
+
+    def test_terminal_precedes_consolidator_for_low_pass_through(self):
+        role, _, evidence = classify({
+            "in_amount": 10_000, "out_amount": 1_000, "unique_senders": 10,
+            "unique_receivers": 1, "in_tx_count": 10, "out_tx_count": 1, "depth": 2,
+        })
+        self.assertEqual(role, "terminal")
+        self.assertIn("10%", evidence)
+
+    def test_coordinator_precedes_transit_when_both_rules_match(self):
+        role, _, _ = classify({
+            "in_amount": 10_000, "out_amount": 9_200, "unique_senders": 6,
+            "unique_receivers": 6, "in_tx_count": 6, "out_tx_count": 6,
+        })
+        self.assertEqual(role, "coordinator")
 
     def test_depth_four_zero_out_degree_is_not_terminal_evidence(self):
         metrics = {
